@@ -26,42 +26,38 @@ st.markdown("""
 # 2. GLOBAL PRODUCTION REGISTRY CACHE (Sourced Live from Neon Cloud DB)
 # =====================================================================
 def load_global_master_registry(region: str) -> pd.DataFrame:
-    db_region = region.strip().upper()
+    db_region = str(region).strip().upper()
     
-    # 1. TRY NEON (LAYER A)
+    # 1. ATTEMPT CSV LOAD (Ignore DB for now, focus on the file)
     try:
-        conn = st.connection("postgresql", type="sql")
-        # Added a limit check to ensure we get data back
-        query = "SELECT standard_name, regional_baseline_price FROM master_registry WHERE region = :region"
-        df = conn.query(query, params={"region": db_region}, ttl=300)
-        
-        if df is not None and not df.empty:
-            df.columns = ["Standard_Name", "Regional_Baseline_Price"]
-            return df
-    except Exception as e:
-        st.sidebar.warning(f"Neon connection unavailable: {e}")
-
-    # 2. FALLBACK TO CSV (LAYER B) - THIS IS YOUR SAFETY NET
-    try:
+        # Streamlit Cloud mounts your repo root as the working directory
         df_full = pd.read_csv("master_registry.csv")
+        
+        # Standardize
         df_full.columns = [c.strip().lower() for c in df_full.columns]
         df_full['region'] = df_full['region'].astype(str).str.strip().str.upper()
         
+        # Filter
         df_region = df_full[df_full['region'] == db_region].copy()
         
-        if not df_region.empty:
-            df_region = df_region.rename(columns={
-                "standard_name": "Standard_Name",
-                "regional_baseline_price": "Regional_Baseline_Price"
-            })
-            return df_region[["Standard_Name", "Regional_Baseline_Price"]]
-        else:
-            st.error(f"Region '{db_region}' not found in master_registry.csv")
+        if df_region.empty:
+            st.error(f"Region '{db_region}' not found. Available: {df_full['region'].unique()}")
+            return pd.DataFrame(columns=["Standard_Name", "Regional_Baseline_Price"])
             
-    except Exception as e:
-        st.error(f"Critical CSV failure: {e}")
+        # Clean & Return
+        df_region = df_region.rename(columns={
+            "standard_name": "Standard_Name",
+            "regional_baseline_price": "Regional_Baseline_Price"
+        })
         
-    return pd.DataFrame(columns=["Standard_Name", "Regional_Baseline_Price"])
+        return df_region[["Standard_Name", "Regional_Baseline_Price"]]
+        
+    except FileNotFoundError:
+        st.error("FATAL: 'master_registry.csv' not found in repo root.")
+        return pd.DataFrame(columns=["Standard_Name", "Regional_Baseline_Price"])
+    except Exception as e:
+        st.error(f"Error: {e}")
+        return pd.DataFrame(columns=["Standard_Name", "Regional_Baseline_Price"])
 
 # =====================================================================
 # 3. HIGH-POWERED THREE-TIER SHIELD ENGINE (ALGORITHMIC RECONCILIATION)
