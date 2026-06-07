@@ -26,26 +26,67 @@ st.markdown("""
 # =====================================================================
 # 2. GLOBAL LOAD (Absolute Path Fix)
 # =====================================================================
-# Get the absolute directory of this file
-base_path = os.path.dirname(os.path.abspath(__file__))
-# Join that path with your filename
-csv_path = os.path.join(base_path, "master_registry.csv")
-
-try:
-    # Check if the file actually exists where we think it is
-    if os.path.exists(csv_path):
-        df_master = pd.read_csv(csv_path)
-        df_master.columns = [c.strip().lower() for c in df_master.columns]
-        df_master['region'] = df_master['region'].astype(str).str.strip().str.upper()
-        st.sidebar.success(f"Registry Loaded! Found {len(df_master)} rows.")
-    else:
-        # If it fails, list what is actually in the folder to help us debug
-        st.sidebar.error(f"File NOT found at {csv_path}")
-        st.sidebar.write("Actual files in directory:", os.listdir(base_path))
-        df_master = pd.DataFrame()
-except Exception as e:
-    st.sidebar.error(f"Registry Load Error: {e}")
-    df_master = pd.DataFrame()
+# Loads master_registry.csv from the same folder as this script.
+# The CSV must have these columns (case-insensitive, spaces allowed):
+#   region | standard_name | regional_baseline_price
+#
+# The loader normalises column names internally, then returns a clean
+# DataFrame with the exact column names the engine expects:
+#   "Standard_Name" and "Regional_Baseline_Price"
+#
+# load_global_master_registry() is the single call site used below —
+# it filters the full registry down to the selected region before
+# returning, so the engine only sees relevant rows.
+ 
+@st.cache_data
+def _load_full_registry() -> pd.DataFrame:
+    """
+    Reads master_registry.csv once and caches the result for the session.
+    Returns a DataFrame with normalised column names ready for filtering.
+    """
+    base_path = os.path.dirname(os.path.abspath(__file__))
+    csv_path = os.path.join(base_path, "master_registry.csv")
+ 
+    if not os.path.exists(csv_path):
+        st.sidebar.error(f"master_registry.csv not found at: {csv_path}")
+        st.sidebar.write("Files present in directory:", os.listdir(base_path))
+        return pd.DataFrame(columns=["Standard_Name", "Regional_Baseline_Price", "region"])
+ 
+    try:
+        df = pd.read_csv(csv_path)
+        # Normalise column names: strip whitespace, lowercase for matching
+        df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+        # Rename to the exact keys the engine expects
+        df = df.rename(columns={
+            "standard_name": "Standard_Name",
+            "regional_baseline_price": "Regional_Baseline_Price"
+        })
+        # Normalise region values for reliable filtering
+        df["region"] = df["region"].astype(str).str.strip().str.upper()
+        st.sidebar.success(f"Registry loaded — {len(df)} entries across all regions.")
+        return df
+    except Exception as e:
+        st.sidebar.error(f"Registry load error: {e}")
+        return pd.DataFrame(columns=["Standard_Name", "Regional_Baseline_Price", "region"])
+ 
+ 
+def load_global_master_registry(region: str) -> pd.DataFrame:
+    """
+    Returns only the rows matching the selected region.
+    Region values in the CSV should be UK, US, or CANADA (case-insensitive).
+    """
+    full_df = _load_full_registry()
+    if full_df.empty:
+        return pd.DataFrame(columns=["Standard_Name", "Regional_Baseline_Price"])
+ 
+    region_key = region.strip().upper()
+    filtered = full_df[full_df["region"] == region_key][["Standard_Name", "Regional_Baseline_Price"]]
+ 
+    if filtered.empty:
+        st.sidebar.warning(f"No registry entries found for region: {region_key}")
+ 
+    return filtered.reset_index(drop=True)
+ 
     
 # =====================================================================
 # 3. HIGH-POWERED THREE-TIER SHIELD ENGINE (ALGORITHMIC RECONCILIATION)
