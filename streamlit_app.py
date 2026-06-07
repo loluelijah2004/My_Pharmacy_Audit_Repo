@@ -22,33 +22,30 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. GLOBAL LOAD (Run this once at start) ---
+import os
+
+# --- 2. GLOBAL LOAD (Absolute Path Fix) ---
+# Get the absolute directory of this file
+base_path = os.path.dirname(os.path.abspath(__file__))
+# Join that path with your filename
+csv_path = os.path.join(base_path, "master_registry.csv")
+
 try:
-    df_master = pd.read_csv("master_registry.csv")
-    df_master.columns = [c.strip().lower() for c in df_master.columns]
-    df_master['region'] = df_master['region'].astype(str).str.strip().str.upper()
-    st.sidebar.success(f"Registry Loaded! Regions found: {df_master['region'].unique()}")
+    # Check if the file actually exists where we think it is
+    if os.path.exists(csv_path):
+        df_master = pd.read_csv(csv_path)
+        df_master.columns = [c.strip().lower() for c in df_master.columns]
+        df_master['region'] = df_master['region'].astype(str).str.strip().str.upper()
+        st.sidebar.success(f"Registry Loaded! Found {len(df_master)} rows.")
+    else:
+        # If it fails, list what is actually in the folder to help us debug
+        st.sidebar.error(f"File NOT found at {csv_path}")
+        st.sidebar.write("Actual files in directory:", os.listdir(base_path))
+        df_master = pd.DataFrame()
 except Exception as e:
     st.sidebar.error(f"Registry Load Error: {e}")
     df_master = pd.DataFrame()
-
-# --- MODIFIED REGISTRY FUNCTION ---
-def load_global_master_registry(region: str) -> pd.DataFrame:
-    if df_master.empty:
-        return pd.DataFrame(columns=["Standard_Name", "Regional_Baseline_Price"])
     
-    db_region = str(region).strip().upper()
-    df_region = df_master[df_master['region'] == db_region].copy()
-    
-    # Debug count
-    st.sidebar.info(f"Searching for {db_region}: Found {len(df_region)} rows.")
-    
-    df_region = df_region.rename(columns={
-        "standard_name": "Standard_Name",
-        "regional_baseline_price": "Regional_Baseline_Price"
-    })
-    return df_region[["Standard_Name", "Regional_Baseline_Price"]]
-
 # =====================================================================
 # 3. HIGH-POWERED THREE-TIER SHIELD ENGINE (ALGORITHMIC RECONCILIATION)
 # =====================================================================
