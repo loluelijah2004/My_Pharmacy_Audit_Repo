@@ -46,7 +46,7 @@ def load_global_master_registry(region: str) -> pd.DataFrame:
     except Exception:
         pass
     
-    # --- LAYER B: SINGLE ORIGINAL REPOSITORY CSV FALLBACK ---
+   # --- LAYER B: SINGLE ORIGINAL REPOSITORY CSV FALLBACK ---
     fallback_filename = "master_registry.csv"
     try:
         import os
@@ -57,11 +57,18 @@ def load_global_master_registry(region: str) -> pd.DataFrame:
             # Read the unified 2,064-row file directly into local memory
             df_full = pd.read_csv(absolute_fallback_path)
             
-            # Standardize column headers to match your file's exact casing
+            # Standardize column headers to lowercase and strip white spaces
             df_full.columns = [c.strip().lower() for c in df_full.columns]
             
-            # Dynamically filter rows where the 'region' column matches the user's selection
-            df_region = df_full[df_full['region'].str.upper() == db_region].copy()
+            # CRITICAL FIX: Clean the data rows to ensure accurate string matching
+            df_full['region'] = df_full['region'].astype(str).str.strip().str.upper()
+            
+            # Dynamically filter rows matching the target jurisdiction
+            df_region = df_full[df_full['region'] == db_region].copy()
+            
+            # Check if we actually found data for the selected region
+            if df_region.empty:
+                st.warning(f"⚠️ Found master file, but 0 rows matched region code '{db_region}'. Available in file: {df_full['region'].unique()}")
             
             # Rename the columns so the matching engine gets exactly what it expects
             df_region = df_region.rename(columns={
@@ -76,8 +83,6 @@ def load_global_master_registry(region: str) -> pd.DataFrame:
             st.error(f"🚨 Resiliency Failure: Global file `{fallback_filename}` missing from repository root.")
     except Exception as fallback_err:
         st.error(f"🚨 Failed parsing repository fallback matrix: {fallback_err}")
-        
-    return pd.DataFrame(columns=["Standard_Name", "Regional_Baseline_Price"])
 
 # =====================================================================
 # 3. HIGH-POWERED THREE-TIER SHIELD ENGINE (ALGORITHMIC RECONCILIATION)
