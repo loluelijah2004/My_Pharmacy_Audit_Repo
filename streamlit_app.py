@@ -28,35 +28,34 @@ st.markdown("""
 def load_global_master_registry(region: str) -> pd.DataFrame:
     db_region = str(region).strip().upper()
     
-    # 1. ATTEMPT CSV LOAD (Ignore DB for now, focus on the file)
     try:
-        # Streamlit Cloud mounts your repo root as the working directory
+        # Load directly from root
         df_full = pd.read_csv("master_registry.csv")
         
-        # Standardize
+        # Standardize headers
         df_full.columns = [c.strip().lower() for c in df_full.columns]
         df_full['region'] = df_full['region'].astype(str).str.strip().str.upper()
         
-        # Filter
+        # DEBUG: Print to logs to see what's happening
+        print(f"DEBUG: Searching for region '{db_region}' in registry.")
+        print(f"DEBUG: Available regions in CSV: {df_full['region'].unique()}")
+        
         df_region = df_full[df_full['region'] == db_region].copy()
         
         if df_region.empty:
-            st.error(f"Region '{db_region}' not found. Available: {df_full['region'].unique()}")
+            print(f"DEBUG: No matches found for '{db_region}'.")
             return pd.DataFrame(columns=["Standard_Name", "Regional_Baseline_Price"])
             
-        # Clean & Return
         df_region = df_region.rename(columns={
             "standard_name": "Standard_Name",
             "regional_baseline_price": "Regional_Baseline_Price"
         })
         
+        print(f"DEBUG: Successfully found {len(df_region)} rows.")
         return df_region[["Standard_Name", "Regional_Baseline_Price"]]
         
-    except FileNotFoundError:
-        st.error("FATAL: 'master_registry.csv' not found in repo root.")
-        return pd.DataFrame(columns=["Standard_Name", "Regional_Baseline_Price"])
     except Exception as e:
-        st.error(f"Error: {e}")
+        print(f"DEBUG CRITICAL ERROR: {e}")
         return pd.DataFrame(columns=["Standard_Name", "Regional_Baseline_Price"])
 
 # =====================================================================
