@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import os
 import time
 from difflib import SequenceMatcher
 
@@ -22,9 +23,9 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-import os
-
-# --- 2. GLOBAL LOAD (Absolute Path Fix) ---
+# =====================================================================
+# 2. GLOBAL LOAD (Absolute Path Fix)
+# =====================================================================
 # Get the absolute directory of this file
 base_path = os.path.dirname(os.path.abspath(__file__))
 # Join that path with your filename
