@@ -22,41 +22,32 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# =====================================================================
-# 2. GLOBAL PRODUCTION REGISTRY CACHE (Sourced Live from Neon Cloud DB)
-# =====================================================================
+# --- 2. GLOBAL LOAD (Run this once at start) ---
+try:
+    df_master = pd.read_csv("master_registry.csv")
+    df_master.columns = [c.strip().lower() for c in df_master.columns]
+    df_master['region'] = df_master['region'].astype(str).str.strip().str.upper()
+    st.sidebar.success(f"Registry Loaded! Regions found: {df_master['region'].unique()}")
+except Exception as e:
+    st.sidebar.error(f"Registry Load Error: {e}")
+    df_master = pd.DataFrame()
+
+# --- MODIFIED REGISTRY FUNCTION ---
 def load_global_master_registry(region: str) -> pd.DataFrame:
-    db_region = str(region).strip().upper()
-    
-    try:
-        # Load directly from root
-        df_full = pd.read_csv("master_registry.csv")
-        
-        # Standardize headers
-        df_full.columns = [c.strip().lower() for c in df_full.columns]
-        df_full['region'] = df_full['region'].astype(str).str.strip().str.upper()
-        
-        # DEBUG: Print to logs to see what's happening
-        print(f"DEBUG: Searching for region '{db_region}' in registry.")
-        print(f"DEBUG: Available regions in CSV: {df_full['region'].unique()}")
-        
-        df_region = df_full[df_full['region'] == db_region].copy()
-        
-        if df_region.empty:
-            print(f"DEBUG: No matches found for '{db_region}'.")
-            return pd.DataFrame(columns=["Standard_Name", "Regional_Baseline_Price"])
-            
-        df_region = df_region.rename(columns={
-            "standard_name": "Standard_Name",
-            "regional_baseline_price": "Regional_Baseline_Price"
-        })
-        
-        print(f"DEBUG: Successfully found {len(df_region)} rows.")
-        return df_region[["Standard_Name", "Regional_Baseline_Price"]]
-        
-    except Exception as e:
-        print(f"DEBUG CRITICAL ERROR: {e}")
+    if df_master.empty:
         return pd.DataFrame(columns=["Standard_Name", "Regional_Baseline_Price"])
+    
+    db_region = str(region).strip().upper()
+    df_region = df_master[df_master['region'] == db_region].copy()
+    
+    # Debug count
+    st.sidebar.info(f"Searching for {db_region}: Found {len(df_region)} rows.")
+    
+    df_region = df_region.rename(columns={
+        "standard_name": "Standard_Name",
+        "regional_baseline_price": "Regional_Baseline_Price"
+    })
+    return df_region[["Standard_Name", "Regional_Baseline_Price"]]
 
 # =====================================================================
 # 3. HIGH-POWERED THREE-TIER SHIELD ENGINE (ALGORITHMIC RECONCILIATION)
