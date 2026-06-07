@@ -26,63 +26,42 @@ st.markdown("""
 # 2. GLOBAL PRODUCTION REGISTRY CACHE (Sourced Live from Neon Cloud DB)
 # =====================================================================
 def load_global_master_registry(region: str) -> pd.DataFrame:
-    """
-    Sources master registry live from Neon DB. If cloud hosting network/DNS
-    constraints block the connection, it falls back to the original full
-    master_registry.csv uploaded directly to the GitHub repository.
-    """
     db_region = region.strip().upper()
     
-    # --- LAYER A: LIVE NEON DB QUERY ---
+    # 1. TRY NEON (LAYER A)
     try:
         conn = st.connection("postgresql", type="sql")
-        query = """
-            SELECT standard_name AS "Standard_Name", regional_baseline_price AS "Regional_Baseline_Price"
-            FROM master_registry WHERE region = :region;
-        """
+        # Added a limit check to ensure we get data back
+        query = "SELECT standard_name, regional_baseline_price FROM master_registry WHERE region = :region"
         df = conn.query(query, params={"region": db_region}, ttl=300)
-        if df is not None and not df.empty:
-            return df
-    except Exception:
-        pass
-    
-   # --- LAYER B: SINGLE ORIGINAL REPOSITORY CSV FALLBACK ---
-    fallback_filename = "master_registry.csv"
-    try:
-        import os
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        absolute_fallback_path = os.path.join(current_dir, fallback_filename)
         
-        if os.path.exists(absolute_fallback_path):
-            # Read the unified 2,064-row file directly into local memory
-            df_full = pd.read_csv(absolute_fallback_path)
-            
-            # Standardize column headers to lowercase and strip white spaces
-            df_full.columns = [c.strip().lower() for c in df_full.columns]
-            
-            # CRITICAL FIX: Clean the data rows to ensure accurate string matching
-            df_full['region'] = df_full['region'].astype(str).str.strip().str.upper()
-            
-            # Dynamically filter rows matching the target jurisdiction
-            df_region = df_full[df_full['region'] == db_region].copy()
-            
-            # Check if we actually found data for the selected region
-            if df_region.empty:
-                st.warning(f"⚠️ Found master file, but 0 rows matched region code '{db_region}'. Available in file: {df_full['region'].unique()}")
-            
-            # Rename the columns so the matching engine gets exactly what it expects
+        if df is not None and not df.empty:
+            df.columns = ["Standard_Name", "Regional_Baseline_Price"]
+            return df
+    except Exception as e:
+        st.sidebar.warning(f"Neon connection unavailable: {e}")
+
+    # 2. FALLBACK TO CSV (LAYER B) - THIS IS YOUR SAFETY NET
+    try:
+        df_full = pd.read_csv("master_registry.csv")
+        df_full.columns = [c.strip().lower() for c in df_full.columns]
+        df_full['region'] = df_full['region'].astype(str).str.strip().str.upper()
+        
+        df_region = df_full[df_full['region'] == db_region].copy()
+        
+        if not df_region.empty:
             df_region = df_region.rename(columns={
                 "standard_name": "Standard_Name",
                 "regional_baseline_price": "Regional_Baseline_Price"
             })
-            
-            st.toast(f"💾 Sandbox Active: Isolated {len(df_region)} baseline entries for {db_region} from unified master matrix.", icon="ℹ️")
             return df_region[["Standard_Name", "Regional_Baseline_Price"]]
-            
         else:
-            st.error(f"🚨 Resiliency Failure: Global file `{fallback_filename}` missing from repository root.")
-    except Exception as fallback_err:
-        st.error(f"🚨 Failed parsing repository fallback matrix: {fallback_err}")
+            st.error(f"Region '{db_region}' not found in master_registry.csv")
+            
+    except Exception as e:
+        st.error(f"Critical CSV failure: {e}")
+        
+    return pd.DataFrame(columns=["Standard_Name", "Regional_Baseline_Price"])
 
 # =====================================================================
 # 3. HIGH-POWERED THREE-TIER SHIELD ENGINE (ALGORITHMIC RECONCILIATION)
