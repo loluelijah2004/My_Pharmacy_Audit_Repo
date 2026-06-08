@@ -3,10 +3,16 @@ import pandas as pd
 import numpy as np
 import os
 import time
+import json
+import hashlib
+import re as _re
 from difflib import SequenceMatcher
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from openai import OpenAI
 
 # =====================================================================
-# 1. PLATFORM CONFIGURATION & STYLING
+# 1. PLATFORM CONFIGURATION & JURISDICTIONAL TAXONOMY
 # =====================================================================
 st.set_page_config(
     page_title="Apex Logic | Global Pharmacy Audit",
@@ -23,146 +29,51 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# =====================================================================
-# 2. MASTER REGISTRY LOADER (CSV-based, Streamlit Cloud compatible)
-# =====================================================================
-# Loads master_registry.csv from the same folder as this script.
-# The CSV must have these columns (case-insensitive, spaces allowed):
-#   region | standard_name | regional_baseline_price
-#
-# The loader normalises column names internally, then returns a clean
-# DataFrame with the exact column names the engine expects:
-#   "Standard_Name" and "Regional_Baseline_Price"
-#
-# load_global_master_registry() is the single call site used below —
-# it filters the full registry down to the selected region before
-# returning, so the engine only sees relevant rows.
-
-# Maps the dropdown label to the exact string used in the CSV region column
-REGION_KEY_MAP = {
-    "UK":     "UK",
-    "US":     "US",
-    "Canada": "CANADA",  # CSV stores "CANADA" (uppercased); dropdown shows "Canada"
+# Jurisdictional translation map for frontend dashboard labels
+JURISDICTION_PROFILES = {
+    "UK": {
+        "csv_key": "UK",
+        "generic_label": "VMP Name (Virtual Medicinal Product)",
+        "brand_label": "AMP Name (Actual Medicinal Product)",
+        "id_label": "VMP / AMP ID"
+    },
+    "US": {
+        "csv_key": "US",
+        "generic_label": "Established Name (Non-Proprietary)",
+        "brand_label": "Proprietary Name (Brand Name)",
+        "id_label": "NDC Number"
+    },
+    "Canada": {
+        "csv_key": "CANADA",
+        "generic_label": "Active Ingredient Name",
+        "brand_label": "Brand Name (Product Name)",
+        "id_label": "DIN (Drug Identification Number)"
+    }
 }
 
-@st.cache_data
-def _load_full_registry() -> pd.DataFrame:
-    """
-    Reads master_registry.csv once and caches the result for the session.
-    NO st calls inside this function — st.cache_data suppresses UI calls
-    after the first run, making diagnostics invisible. Diagnostics are
-    handled in load_global_master_registry() which is NOT cached.
-    """
-    base_path = os.path.dirname(os.path.abspath(__file__))
-    csv_path = os.path.join(base_path, "master_registry.csv")
+CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "layer1_cache_db.json")
 
-    if not os.path.exists(csv_path):
-        return pd.DataFrame(columns=["Standard_Name", "Regional_Baseline_Price", "region", "_error"])
+def load_cache_db():
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
 
-    try:
-        df = pd.read_csv(csv_path)
-        # Normalise column names: strip whitespace, lowercase, underscores for spaces
-        df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
-
-        # Flexible column matching
-        name_aliases   = ["standard_name", "drug_name", "name", "drug", "medication", "product"]
-        price_aliases  = ["regional_baseline_price", "baseline_price", "price", "unit_price", "cost", "amount"]
-        region_aliases = ["region", "country", "jurisdiction", "market"]
-
-        matched_name_col   = next((c for c in df.columns if c in name_aliases),   None)
-        matched_price_col  = next((c for c in df.columns if c in price_aliases),  None)
-        matched_region_col = next((c for c in df.columns if c in region_aliases), None)
-
-        if not matched_name_col or not matched_price_col or not matched_region_col:
-            # Return an empty frame with an _error column so the caller can show a message
-            err = pd.DataFrame(columns=["Standard_Name", "Regional_Baseline_Price", "region", "_error"])
-            err.attrs["col_error"] = f"Detected columns: {list(df.columns)}"
-            return err
-
-        df = df.rename(columns={
-            matched_name_col:   "Standard_Name",
-            matched_price_col:  "Regional_Baseline_Price",
-            matched_region_col: "region"
-        })
-
-        # Uppercase region so filtering is case-insensitive ("us" == "US" == "CANADA")
-        df["region"] = df["region"].astype(str).str.strip().str.upper()
-        df["_loaded"] = True  # sentinel so caller knows load succeeded
-        return df[["Standard_Name", "Regional_Baseline_Price", "region", "_loaded"]]
-
-    except Exception as e:
-        err = pd.DataFrame(columns=["Standard_Name", "Regional_Baseline_Price", "region", "_error"])
-        err.attrs["load_error"] = str(e)
-        return err
-
-
-def load_global_master_registry(region: str) -> pd.DataFrame:
-    """
-    Public entry point. Filters the full registry to the selected region
-    and surfaces diagnostics — safe to call st here since this is NOT cached.
-    """
-    full_df = _load_full_registry()
-
-    # Surface any load errors
-    if "_error" in full_df.columns:
-        col_error = full_df.attrs.get("col_error")
-        load_error = full_df.attrs.get("load_error")
-        if load_error:
-            st.sidebar.error(f"❌ Failed to read master_registry.csv: {load_error}")
-        elif col_error:
-            st.sidebar.error(
-                f"❌ Could not find required columns in master_registry.csv.\n"
-                f"{col_error}\n"
-                f"Expected columns like: region, standard_name, regional_baseline_price"
-            )
-        return pd.DataFrame(columns=["Standard_Name", "Regional_Baseline_Price"])
-
-    if "_loaded" not in full_df.columns:
-        st.sidebar.error("❌ master_registry.csv not found in the repo root folder.")
-        return pd.DataFrame(columns=["Standard_Name", "Regional_Baseline_Price"])
-
-    # Map the dropdown value ("Canada") to the CSV region key ("CANADA")
-    region_key = REGION_KEY_MAP.get(region, region.strip().upper())
-    unique_regions = sorted(full_df["region"].unique().tolist())
-
-    filtered = full_df[full_df["region"] == region_key][["Standard_Name", "Regional_Baseline_Price"]]
-
-    if filtered.empty:
-        st.sidebar.warning(
-            f"⚠️ No drugs found for region `{region_key}`. "
-            f"Regions present in your CSV: `{unique_regions}`"
-        )
-    else:
-        st.sidebar.success(
-            f"✅ {len(filtered)} drugs loaded for {region} (`{region_key}`). "
-            f"All regions in CSV: `{unique_regions}`"
-        )
-
-    return filtered.reset_index(drop=True)
-
-
+def save_cache_db(cache_data):
+    with open(CACHE_FILE, "w") as f:
+        json.dump(cache_data, f, indent=4)
 
 # =====================================================================
-# 3. INVOICE NORMALISATION + THREE-TIER SHIELD ENGINE
+# 2. ADVANCED INVOICE NORMALISATION EXTRACTION (FROM SCRIPT 1_2)
 # =====================================================================
-# Real pharmacy invoices use abbreviations and include dosage/batch noise:
-#   "AMOX 500MG CAPS // BATCH-58"  ->  fuzzy score vs "Amoxicillin" = 0.35 (FAILS)
-# After normalisation:
-#   "Amoxicillin"                  ->  fuzzy score vs "Amoxicillin" = 1.00 (PASSES)
-#
-# Two-step process:
-#   1. Strip batch codes, dosage strengths, and dosage form words.
-#   2. Expand known abbreviations to full clinical names.
-
-import re as _re
-
-# Ordered list: longest/most-specific abbreviations first.
-# "metoprolol tar" must appear before "met" or "met" would consume it first.
 _ABBREV_MAP = [
-    ("amox/clav",      "Amoxicillin"),   # combo product
+    ("amox/clav",      "Amoxicillin"),   
     ("metoprolol tar", "Metoprolol"),
     ("metoprolol",     "Metoprolol"),
-    ("metformin",      "Metformin"),     # full name variant — normalise case
+    ("metformin",      "Metformin"),     
     ("lisino",         "Lisinopril"),
     ("atorva",         "Atorvastatin"),
     ("simva",          "Simvastatin"),
@@ -172,14 +83,14 @@ _ABBREV_MAP = [
     ("amlo",           "Amlodipine"),
     ("levo",           "Levothyroxine"),
     ("amox",           "Amoxicillin"),
-    ("met",            "Metformin"),     # keep last among "met*" — catches MET, MET ER etc.
+    ("met",            "Metformin"),     
 ]
 
 _STRIP_PATTERN = _re.compile(
     r'\s*//\s*batch[-\s]?\w+'
-    r'|\d+(?:\.\d+)?(?:/\d+)?\s*(?:mg|mcg|g|ml|iu)'
-    r'|(?:tab|tabs|cap|caps|er|sr|xr|eff|inh|inj|soln?|susp|tar)'
-    r'|x-\d+',
+    r'| \d+(?:\.\d+)?(?:/\d+)?\s*(?:mg|mcg|g|ml|iu) '
+    r'| (?:tab|tabs|cap|caps|er|sr|xr|eff|inh|inj|soln?|susp|tar) '
+    r'| x-\d+ ',
     _re.IGNORECASE
 )
 
@@ -193,15 +104,121 @@ def _normalise_drug_name(raw: str) -> str:
             remainder = pattern.sub("", name_lower).strip()
             name = full + (" " + remainder if remainder else "")
             break
-    name = _re.sub(r'[a-zA-Z]', '', name).strip()
+    name = _re.sub(r' [a-zA-Z] ', '', name).strip()
     return " ".join(name.split())
 
+# =====================================================================
+# 3. FLEXIBLE MASTER REGISTRY LOADER
+# =====================================================================
+@st.cache_data
+def _load_full_registry() -> pd.DataFrame:
+    base_path = os.path.dirname(os.path.abspath(__file__))
+    csv_path = os.path.join(base_path, "master_registry.csv")
 
-def run_three_tier_shield_engine(standardized_df, master_df, confidence_threshold=0.65):
+    if not os.path.exists(csv_path):
+        return pd.DataFrame()
+
+    try:
+        df = pd.read_csv(csv_path)
+        df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+        
+        # Flexibly match registry columns from both variations
+        df = df.rename(columns={
+            "region": "region",
+            "country": "region",
+            "jurisdiction": "region",
+            "market": "region",
+            "vmp_name": "generic_name",
+            "generic_name": "generic_name",
+            "active_ingredient": "generic_name",
+            "standard_name": "generic_name",
+            "drug_name": "generic_name",
+            "amp_name": "brand_name",
+            "brand_name": "brand_name",
+            "proprietary_name": "brand_name",
+            "product_name": "brand_name",
+            "regional_baseline_price": "baseline_price",
+            "price": "baseline_price",
+            "unit_price": "baseline_price",
+            "cost": "baseline_price",
+            "system_id": "system_id",
+            "ndc": "system_id",
+            "din": "system_id"
+        })
+        
+        df["region"] = df["region"].astype(str).str.strip().str.upper()
+        return df
+    except:
+        return pd.DataFrame()
+
+def load_jurisdictional_registry(region_setting: str) -> pd.DataFrame:
+    full_df = _load_full_registry()
+    if full_df.empty:
+        return pd.DataFrame(columns=["generic_name", "brand_name", "baseline_price", "system_id", "region"])
+    
+    target_key = JURISDICTION_PROFILES.get(region_setting, {}).get("csv_key", "UK")
+    filtered = full_df[full_df["region"] == target_key].copy()
+    
+    for col in ["generic_name", "brand_name", "baseline_price", "system_id"]:
+        if col not in filtered.columns:
+            filtered[col] = "N/A"
+            
+    return filtered.reset_index(drop=True)
+
+# =====================================================================
+# 4. ADVANCED 3-TIER SHIELD RECONCILIATION ENGINE
+# =====================================================================
+def call_layer3_ai_api(raw_text: str, jurisdiction: str, examples: list) -> dict:
+    """
+    [Phase 4: Layer 3 Fallback AI Engine] Enforces a rigid JSON format response
+    """
+    if "OPENAI_API_KEY" not in st.secrets:
+        return {"status": "failure"}
+    
+    try:
+        client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+        
+        system_prompt = (
+            f"You are an expert clinical pharmacy database matching node for the {jurisdiction} market.\n"
+            f"Match the messy input text string to its exact clean generic identity and brand name profile.\n"
+            f"You must evaluate and return ONLY a valid JSON object matching this schema precisely without prose:\n"
+            "{\n"
+            "  \"generic_name\": \"Clean Generic Name/VMP with strength\",\n"
+            "  \"brand_name\": \"Clean Brand Name/AMP/Manufacturer descriptor\",\n"
+            "  \"system_id\": \"Standard registry ID code (NDC, DIN, or VMP ID) if inferred from context\",\n"
+            "  \"manufacturer_id\": \"Inferred wholesaler code or original tracking ID\"\n"
+            "}"
+        )
+        
+        user_prompt = f"Messy Input Text: \"{raw_text}\"\n\nValid system database options for context:\n{examples[:30]}"
+        
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0
+        )
+        return json.loads(response.choices[0].message.content)
+    except:
+        return {"status": "failure"}
+
+def run_reconciliation_audit(client_df: pd.DataFrame, master_df: pd.DataFrame, jurisdiction: str, confidence_threshold=0.92):
     processed_rows = []
-    master_names = master_df["Standard_Name"].values
+    cache_db = load_cache_db()
+    
+    # Intelligently construct lookup strings pooling together brand and generic properties 
+    master_df["lookup_pool"] = master_df["generic_name"].astype(str) + " " + master_df["brand_name"].astype(str)
+    search_pool = master_df["lookup_pool"].dropna().unique().tolist()
+    
+    # Character-level TF-IDF prevents false exclusions of brand/generic syntax shifts
+    vectorizer = TfidfVectorizer(analyzer='char_wb', ngram_range=(2, 4))
+    tfidf_matrix = vectorizer.fit_transform(search_pool) if search_pool else None
 
-    for idx, row in standardized_df.iterrows():
+    for idx, row in client_df.iterrows():
+        # Dynamic tracking token handling for SKUs
         if "SKU" in row.index and pd.notna(row["SKU"]):
             sku = row["SKU"]
         elif "Distributor_SKU" in row.index and pd.notna(row["Distributor_SKU"]):
@@ -209,87 +226,144 @@ def run_three_tier_shield_engine(standardized_df, master_df, confidence_threshol
         else:
             sku = f"LINE_{idx}"
 
-        raw_input = str(row["Client_Drug_Name"]).strip()
+        raw_input = str(row.get("Client_Drug_Name", "")).strip()
+        wholesaler_id = str(row.get("Wholesaler_ID", row.get("Supplier", "GENERIC_MFR"))).strip()
+        total_invoice_cost = float(row.get("Client_Current_Price", 0.0))
+
+        # Core clinical parsing matrix for volume quantities
+        pack_size = 1
+        pack_match = _re.search(r'(?:x|pack of\s*|/)?(\d{1,4})\s*(?:tabs?|caps?|s|pack|pcs|vials?)?\b', raw_input, _re.IGNORECASE)
+        if pack_match:
+            try:
+                pack_size = int(pack_match.group(1))
+                if pack_size == 0: pack_size = 1
+            except:
+                pack_size = 1
+
+        true_unit_cost = total_invoice_cost / pack_size
+        
+        # Apply normalization pre-processing engine from Script 1_2
         normalised_input = _normalise_drug_name(raw_input)
-        wholesaler_price = float(row["Client_Current_Price"])
 
-        best_match_name = None
-        highest_score = 0.0
-        match_protocol = "Layer 3: Flagged Exception"
+        # Build tracking fingerprint check for deterministic speed
+        lookup_string = f"{wholesaler_id}||{raw_input}".lower()
+        hash_key = hashlib.md5(lookup_string.encode('utf-8')).hexdigest()
 
-        # --- LAYER 1: EXACT MATCH LOOKUP --- uses normalised name
-        exact_match = master_df[master_df["Standard_Name"].str.lower() == normalised_input.lower()]
-        if not exact_match.empty:
-            best_match_name = exact_match.iloc[0]["Standard_Name"]
-            baseline_price = exact_match.iloc[0]["Regional_Baseline_Price"]
-            highest_score = 1.00
-            match_protocol = "Layer 1: Exact Registry Match"
+        generic_out, brand_out, sys_id_out, mfr_id_out = "", "", "", wholesaler_id
+        match_method = ""
+        score = 1.00
 
-        # --- LAYER 2: FUZZY CHARACTER VECTOR MATRIX MATCH ---
+        # --- TIER 1 SHIELD: LOCAL STORAGE CACHE LOOKUP ---
+        if hash_key in cache_db:
+            generic_out = cache_db[hash_key]["generic_name"]
+            brand_out = cache_db[hash_key]["brand_name"]
+            sys_id_out = cache_db[hash_key]["system_id"]
+            mfr_id_out = cache_db[hash_key].get("manufacturer_id", wholesaler_id)
+            match_method = "Layer 1: Exact Registry Match"
+            
+        # --- TIER 2 SHIELD: HIGH SPEED ALGORTIHMIC VECTOR STRING MATCH ---
+        elif tfidf_matrix is not None and len(normalised_input) > 0:
+            # Look up calculations against the normalized variants
+            raw_vec = vectorizer.transform([normalised_input])
+            similarities = cosine_similarity(raw_vec, tfidf_matrix).flatten()
+            best_idx = similarities.argmax()
+            score = similarities[best_idx]
+            
+            if score >= confidence_threshold:
+                matched_text = search_pool[best_idx]
+                records = master_df[master_df["lookup_pool"] == matched_text]
+                
+                if not records.empty:
+                    generic_out = str(records.iloc[0]["generic_name"])
+                    brand_out = str(records.iloc[0]["brand_name"])
+                    sys_id_out = str(records.iloc[0]["system_id"])
+                match_method = "Layer 2: Algorithmic Vector Match"
+                
+                cache_db[hash_key] = {"generic_name": generic_out, "brand_name": brand_out, "system_id": sys_id_out, "manufacturer_id": mfr_id_out}
+                save_cache_db(cache_db)
+                
+            # --- TIER 3 SHIELD: STRUCTURED OUT AI API FALLBACK (Protects 10,000-row volume) ---
+            else:
+                ai_res = call_layer3_ai_api(raw_input, jurisdiction, search_pool)
+                if "generic_name" in ai_res and ai_res["generic_name"] != "UNRESOLVED":
+                    generic_out = ai_res["generic_name"]
+                    brand_out = ai_res["brand_name"]
+                    sys_id_out = ai_res["system_id"]
+                    mfr_id_out = ai_res.get("manufacturer_id", wholesaler_id)
+                    match_method = "Layer 3: AI Sandbox Resolution"
+                    
+                    cache_db[hash_key] = {"generic_name": generic_out, "brand_name": brand_out, "system_id": sys_id_out, "manufacturer_id": mfr_id_out}
+                    save_cache_db(cache_db)
+                else:
+                    generic_out = "UNRESOLVED - REQUIRES HUMAN OVERRIDE"
+                    brand_out = "UNRESOLVED - REQUIRES HUMAN OVERRIDE"
+                    sys_id_out = "FLAGGED"
+                    match_method = "Layer 3: Flagged Anomaly Exception"
+                    score = 0.0
         else:
-            for master_name in master_names:
-                score = SequenceMatcher(None, normalised_input.lower(), master_name.lower()).ratio()
-                if score > highest_score:
-                    highest_score = score
-                    best_match_name = master_name
+            generic_out = "UNRESOLVED - REQUIRES HUMAN OVERRIDE"
+            brand_out = "UNRESOLVED - REQUIRES HUMAN OVERRIDE"
+            match_method = "Layer 3: Flagged Anomaly Exception"
+            score = 0.0
 
-            if best_match_name is not None:
-                matched_record = master_df[master_df["Standard_Name"] == best_match_name]
-                baseline_price = matched_record.iloc[0]["Regional_Baseline_Price"] if not matched_record.empty else wholesaler_price
-            else:
-                baseline_price = wholesaler_price
-
-            if highest_score >= confidence_threshold:
-                match_protocol = "Layer 2: Algorithmic Vector Match"
-            else:
-                match_protocol = "Layer 3: Flagged Anomaly Exception"
-                best_match_name = "UNRESOLVED - REQUIRES HUMAN OVERRIDE"
-                baseline_price = wholesaler_price
-
-        variance = wholesaler_price - baseline_price
-        variance_pct = (variance / baseline_price) * 100 if baseline_price > 0 else 0
+        # --- AUTOMATED TARIFF COMPLIANCE EVALUATION ---
+        baseline_tariff = 0.0
+        audit_verdict = "Clearance Checked"
+        
+        if "UNRESOLVED" not in generic_out:
+            matched_price_record = master_df[master_df["generic_name"] == generic_out]
+            if not matched_price_record.empty:
+                baseline_tariff = float(matched_price_record.iloc[0]["baseline_price"])
+                
+        variance = true_unit_cost - baseline_tariff if baseline_tariff > 0 else 0.0
+        variance_pct = (variance / baseline_tariff) * 100 if baseline_tariff > 0 else 0.0
+        
+        if variance > 0.05:
+            audit_verdict = "🚨 TARIFF OVERCHARGE"
 
         processed_rows.append({
             "SKU": sku,
-            "Raw Input Phrase": raw_input,
-            "Resolved Clinical Name": best_match_name,
-            "Match Protocol": match_protocol,
-            "Confidence": f"{highest_score * 100:.1f}%",
-            "Invoice Price": f"${wholesaler_price:.2f}",
-            "Market Baseline": f"${baseline_price:.2f}",
-            "Price Leakage": variance,
+            "Original Invoice Tag (Input)": raw_input,
+            "Generic Name (VMP)": generic_out,
+            "Brand Name (AMP)": brand_out,
+            "Manufacturer / Wholesaler ID": mfr_id_out,
+            "System ID Field": sys_id_out,
+            "Match Method Used": match_method,
+            "Confidence": f"{score * 100:.1f}%",
+            "True Unit Cost": true_unit_cost,
+            "Tariff Rate Benchmark": baseline_tariff,
+            "Leakage Cost": variance,
             "Leakage %": variance_pct,
-            "Raw_Confidence": highest_score
+            "Audit Verdict": audit_verdict,
+            "Raw_Score": score,
+            "Hash_Key": hash_key
         })
-
+        
     return pd.DataFrame(processed_rows)
 
-
-def highlight_anomalies(row):
+def style_audit_matrix(row):
     styles = [''] * len(row)
-    col_names = row.index.tolist()
-    if "Layer 3" in str(row["Match Protocol"]):
-        return ['background-color: rgba(255, 193, 7, 0.22); border-left: 4px solid #FFC107;'] * len(row)
-    if float(row["Price Leakage"]) > 0.05 and "Layer 3" not in str(row["Match Protocol"]):
-        highlight = 'background-color: rgba(255, 87, 34, 0.25); color: #FF9966; font-weight: bold;'
-        for col in ["Invoice Price", "Price Leakage"]:
-            if col in col_names:
-                styles[col_names.index(col)] = highlight
+    if "Anomaly" in str(row["Match Method Used"]) or "Exception" in str(row["Match Method Used"]):
+        return ['background-color: rgba(255, 193, 7, 0.12); border-left: 4px solid #FFC107;'] * len(row)
+    if "OVERCHARGE" in str(row["Audit Verdict"]):
+        highlight = 'background-color: rgba(255, 87, 34, 0.18); color: #FF7777; font-weight: bold;'
+        for target_col in ["True Unit Cost", "Leakage Cost", "Audit Verdict"]:
+            if target_col in row.index:
+                styles[row.index.get_loc(target_col)] = highlight
     return styles
 
-
 # =====================================================================
-# 4. UNIFIED STREAMLIT USER INTERFACE FRAMEWORK
+# 5. DASHBOARD USER INTERFACE FRAMEWORK
 # =====================================================================
 st.markdown('<div class="brand-header">▲ APEX LOGIC</div>', unsafe_allow_html=True)
 st.markdown('<div class="brand-subtitle">GLOBAL PHARMACY AUDIT ENGINE</div>', unsafe_allow_html=True)
 
-tab_website, tab_webapp = st.tabs(["🏠 Platform Overview", "⚡ Automated Audit Suite"])
+tab_overview, tab_workspace = st.tabs(["🏠 Platform Overview", "⚡ Automated Audit Suite"])
 
 # -----------------------------------------------------------------
-# TAB 1: FRONT-END WEBSITE OVERVIEW
+# TAB 1: FRONT-END WEBSITE OVERVIEW (FROM SCRIPT 1_2)
 # -----------------------------------------------------------------
-with tab_website:
+with tab_overview:
     col_left, col_right = st.columns([2, 1])
     with col_left:
         st.markdown("### Reclaim Your Pharmacy's Lost Margin")
@@ -307,20 +381,18 @@ with tab_website:
         st.success("Layer 3 Deep Boundary Safety Safeguards: Engaged")
 
 # -----------------------------------------------------------------
-# TAB 2: THE OPERATIONAL CORE INDUSTRIAL SOFTWARE WORKSPACE
+# TAB 2: OPERATIONAL WORKSPACE INTERFACE 
 # -----------------------------------------------------------------
-with tab_webapp:
-    st.markdown("### Operational Audit Dashboard")
-
+with tab_workspace:
     with st.sidebar:
         st.markdown("### 📊 Parameter Profiles")
-        selected_region = st.selectbox("Target Jurisdictional Region", ["UK", "US", "Canada"])
-        confidence_threshold = st.slider("Automated Layer Confidence Filter", 0.50, 1.00, 0.70, help="Any algorithmic calculation score dropping below this percentage triggers human confirmation layers.")
-
+        jurisdiction = st.selectbox("Target Jurisdictional Region", ["UK", "US", "Canada"])
+        threshold = st.slider("Automated Layer Confidence Filter", 0.50, 1.00, 0.92, help="Any algorithmic calculation score dropping below this percentage triggers automated AI evaluations or human confirmations.")
+        
         st.write("---")
-        st.caption(f"Active Profile: {selected_region} Data Standalone Core")
+        st.caption(f"Active Profile: {jurisdiction} Data Standalone Core")
         st.caption("Workspace Security: Sandboxed Session RAM")
-
+        
         st.write("---")
         with st.container(border=True):
             st.markdown("<small>🔒 **ARCHITECTURAL BOUNDARY**</small>", unsafe_allow_html=True)
@@ -338,34 +410,37 @@ with tab_webapp:
             "**Contracted Response SLA:** `2-Hour Institutional Turnaround`  \n"
             "**Regulatory Coverage:** `B2B Procurement Cleared`"
         )
-
-    # This now correctly calls the function defined above
-    master_registry_df = load_global_master_registry(selected_region)
+        
+    j_profile = JURISDICTION_PROFILES[jurisdiction]
+    master_registry = load_jurisdictional_registry(jurisdiction)
 
     st.markdown("#### 📑 Procurement Manifest Ingestion")
     st.markdown("<p style='color: #888; margin-top: -10px;'>Drop distribution invoices, formulas, or raw manifest logs to run registry audits.</p>", unsafe_allow_html=True)
 
     uploaded_file = st.file_uploader(
-        "Upload Client Invoice, Formulary, or Procurement Sheet (.csv, .xlsx)",
+        "Upload Client Invoice, Formulary, or Procurement Sheet (.csv, .xlsx)", 
         type=["csv", "xlsx"],
-        label_visibility="collapsed",
-        help="Supports standard enterprise procurement sheets. Columns will auto-align.",
-        key="client_procurement_uploader"
+        label_visibility="collapsed"
     )
 
     if uploaded_file is not None:
+        # File parsing ingestion matrix
         try:
             if uploaded_file.name.endswith('.csv'):
-                client_df = pd.read_csv(uploaded_file)
+                client_data = pd.read_csv(uploaded_file)
             else:
-                client_df = pd.read_excel(uploaded_file)
+                client_data = pd.read_excel(uploaded_file)
         except Exception as e:
             st.error(f"🚨 Failed to read file structural layout. Error detail: {e}")
             st.stop()
 
-        st.dataframe(client_df.head(5), width='stretch')
+        # Display raw 5 row file preview layout (From Script 1_2)
+        st.markdown("##### 📄 Ingested Raw Source Matrix Preview")
+        st.dataframe(client_data.head(5), width='stretch')
 
-        raw_columns = client_df.columns.tolist()
+        raw_columns = client_data.columns.tolist()
+        
+        # Automated parsing alignment matrix using the synonym dictionary thesaurus (From Script 1_2)
         normalized_map = {
             col: col.strip().lower().replace("_", "").replace(" ", "").replace("-", "").replace("/", "")
             for col in raw_columns
@@ -375,11 +450,11 @@ with tab_webapp:
             "drug_name": [
                 "drugname", "drug", "product", "productname", "item", "itemdescription",
                 "medication", "medicationname", "medicine", "description", "standardname",
-                "molecule", "activeingredient", "clinicalname", "brand", "rawinputphrase", "resolvedclinicalname"
+                "molecule", "activeingredient", "clinicalname", "brand", "rawinputphrase", "resolvedclinicalname", "clientdrugname"
             ],
             "current_price": [
                 "currentprice", "price", "cost", "unitprice", "rate", "amount",
-                "baselineprice", "procurementcost", "contractprice", "billingamount", "acquisitioncost", "invoiceprice", "marketbaseline"
+                "baselineprice", "procurementcost", "contractprice", "billingamount", "acquisitioncost", "invoiceprice", "marketbaseline", "clientcurrentprice"
             ]
         }
 
@@ -393,12 +468,12 @@ with tab_webapp:
                 detected_price_col = original_col
 
         st.markdown("#### ⚙️ Ingestion Matrix Verification")
-        col1, col2 = st.columns(2)
-
+        c1, c2 = st.columns(2)
+        
         default_drug_idx = raw_columns.index(detected_drug_col) if detected_drug_col in raw_columns else 0
         default_price_idx = raw_columns.index(detected_price_col) if detected_price_col in raw_columns else min(1, len(raw_columns) - 1)
 
-        with col1:
+        with c1:
             if detected_drug_col:
                 st.success(f"🎯 Auto-detected Drug Column: **'{detected_drug_col}'**")
                 final_drug_col = detected_drug_col
@@ -406,7 +481,7 @@ with tab_webapp:
                 st.warning("🕵️‍♂️ Product/Drug column could not be auto-aligned.")
                 final_drug_col = st.selectbox("Map your Product/Drug Name column manually:", options=raw_columns, index=default_drug_idx, key="manual_drug_select")
 
-        with col2:
+        with c2:
             if detected_price_col:
                 st.success(f"🎯 Auto-detected Pricing Column: **'{detected_price_col}'**")
                 final_price_col = detected_price_col
@@ -414,105 +489,91 @@ with tab_webapp:
                 st.warning("🕵️‍♂️ Pricing/Cost column could not be auto-aligned.")
                 final_price_col = st.selectbox("Map your Current Unit Price column manually:", options=raw_columns, index=default_price_idx, key="manual_price_select")
 
-        processing_df = client_df.copy()
-
-        if final_drug_col not in raw_columns:
-            final_drug_col = raw_columns[0] if raw_columns else None
-
-        if final_drug_col:
-            processing_df["Client_Drug_Name"] = client_df[final_drug_col]
-        else:
-            st.error("🚨 Ingestion Engine Error: Unable to bind a valid Product/Drug column.")
-            st.stop()
-
-        if final_price_col and final_price_col in raw_columns and final_price_col != final_drug_col:
-            processing_df["Client_Current_Price"] = (
-                client_df[final_price_col]
-                .astype(str)
-                .str.replace(r"[^\d.]", "", regex=True)
-                .replace("", "0")
-                .astype(float)
-            )
-        else:
-            processing_df["Client_Current_Price"] = 0.0
-            st.info("💡 No valid pricing column mapped. Initializing current benchmarks to 0.0.")
-
-        processing_df = processing_df.dropna(subset=["Client_Drug_Name"])
-        processing_df["Client_Drug_Name"] = processing_df["Client_Drug_Name"].astype(str).str.strip()
+        working_df = client_data.copy()
+        working_df["Client_Drug_Name"] = client_data[final_drug_col].astype(str)
+        working_df["Client_Current_Price"] = client_data[final_price_col].astype(str).str.replace(r"[^\d.]", "", regex=True).replace("", "0").astype(float)
+        
+        # Fire screen configuration toast confirmation (From Script 1_2)
         st.toast("🚀 Ingestion engine synchronized with downstream parameters!", icon="✅")
 
         st.markdown("---")
-        st.markdown("#### ⚡ Live Reconciliation Audit Data Engine")
+        st.markdown("#### ⚙️ Processing Framework Operational Stream")
 
-        # VERSION stamp: increment this any time the engine logic changes.
-        # This busts the session_state cache so the new code actually runs.
-        ENGINE_VERSION = "v3"
-        audit_cache_key = f"{ENGINE_VERSION}_{uploaded_file.name}_{selected_region}_{confidence_threshold}"
-        if st.session_state.get("audit_cache_key") != audit_cache_key:
-            with st.spinner("Executing sequence match calculations across regional master profiles..."):
-                st.session_state.audit_results = run_three_tier_shield_engine(
-                    processing_df, master_registry_df, confidence_threshold
-                )
-                st.session_state.audit_cache_key = audit_cache_key
+        run_id = f"v7_merged_{uploaded_file.name}_{jurisdiction}_{threshold}"
+        if st.session_state.get("run_id") != run_id:
+            with st.spinner("Executing structural multi-layer match calculations across regional master profiles..."):
+                st.session_state.audit_data = run_reconciliation_audit(working_df, master_registry, jurisdiction, threshold)
+                st.session_state.run_id = run_id
 
-        audit_results_df = st.session_state.audit_results
+        results_df = st.session_state.audit_data
+        
+        # Calculate pricing exposure variances
+        overcharges = results_df[results_df["Audit Verdict"] == "🚨 TARIFF OVERCHARGE"]
+        normal_matches = results_df[results_df["Audit Verdict"] == "Clearance Checked"]
+        
+        total_overcharged = overcharges["Leakage Cost"].sum()
+        undercharged_records = results_df[results_df["Leakage Cost"] < 0]
+        total_undercharged = undercharged_records["Leakage Cost"].sum()
+        exceptions_flagged = results_df[results_df["Match Method Used"].str.contains("Anomaly|Exception")]
 
-        flagged_anomalies = audit_results_df[audit_results_df["Raw_Confidence"] < confidence_threshold]
-        resolved_df = audit_results_df[audit_results_df["Raw_Confidence"] >= confidence_threshold]
-        total_overcharged = resolved_df[resolved_df["Price Leakage"] > 0]["Price Leakage"].sum()
-        total_undercharged = resolved_df[resolved_df["Price Leakage"] < 0]["Price Leakage"].sum()
-
+        # Render integrated macro metrics dashboard cards
         metric_col1, metric_col2, metric_col3 = st.columns(3)
         with metric_col1:
-            st.metric("Total Manifest Rows Audited", len(audit_results_df))
+            st.metric("Total Manifest Rows Audited", len(results_df))
         with metric_col2:
             st.metric(
-                "Estimated Overpayment Exposure",
-                f"${total_overcharged:.2f}",
-                delta=f"${abs(total_undercharged):.2f} Favourable Variance" if total_undercharged < 0 else None,
+                "Estimated Overpayment Exposure", 
+                f"${total_overcharged:,.2f}",
+                delta=f"${abs(total_undercharged):,.2f} Favourable Variance" if total_undercharged < 0 else None,
                 delta_color="normal"
             )
         with metric_col3:
-            st.metric("Unresolved Exceptions Flagged", len(flagged_anomalies), delta=f"{len(flagged_anomalies)} Actions Required", delta_color="off")
+            st.metric("Unresolved Exceptions Flagged", len(exceptions_flagged), delta=f"{len(exceptions_flagged)} Actions Required", delta_color="off")
 
         st.markdown("##### Processed Audit Stream Workspace")
         st.caption("💡 Highlighted Row = Layer 3 Flagged Exception | Highlighted Financial Cells = Wholesaler Price Gouging Surge Over National Averages")
 
-        display_df = audit_results_df.drop(columns=["Raw_Confidence"])
-        st.dataframe(display_df.style.apply(highlight_anomalies, axis=1), width='stretch')
+        # Remap standard matrix system data tags dynamically based on dashboard settings
+        display_df = results_df.copy()
+        display_df = display_df.rename(columns={
+            "Generic Name (VMP)": j_profile["generic_label"],
+            "Brand Name (AMP)": j_profile["brand_label"],
+            "System ID Field": j_profile["id_label"]
+        })
 
-        if len(flagged_anomalies) > 0:
+        # Formatted currency representation outputs
+        for monetary_col in ["True Unit Cost", "Tariff Rate Benchmark", "Leakage Cost"]:
+            display_df[monetary_col] = display_df[monetary_col].map("${:,.4f}".format)
+        display_df["Leakage %"] = display_df["Leakage %"].map("{:,.1f}%".format)
+
+        st.dataframe(display_df.style.apply(style_audit_matrix, axis=1), width='stretch')
+
+        # Human-In-The-Loop Exception Resolution Matrix Training System
+        if len(exceptions_flagged) > 0:
             st.markdown("---")
-            st.markdown("#### 🛠️ Step 3: Human-In-The-Loop Exception Resolution Matrix")
+            st.markdown("#### 🛠️ Human-In-The-Loop Exception Resolution Matrix")
             st.warning("The algorithmic engine flagged low-confidence inputs that failed your threshold safety. Reassign them manually below:")
-
-            for idx, row in flagged_anomalies.iterrows():
-                st.markdown(f"**SKU Source Target:** `{row['SKU']}` | **Corrupted Text Ingested:** *\"{row['Raw Input Phrase']}\"*")
-                widget_key = f"override_{idx}"
-                override_options = ["-- Select Correct Registry Mapping --"] + list(master_registry_df["Standard_Name"].values)
-                st.selectbox(f"Select Confirmed Identity to Map to Item {row['SKU']}:", options=override_options, key=widget_key)
-
-            export_df = audit_results_df.drop(columns=["Raw_Confidence"]).copy()
-            for idx, row in flagged_anomalies.iterrows():
-                widget_key = f"override_{idx}"
-                chosen = st.session_state.get(widget_key, "-- Select Correct Registry Mapping --")
-                if chosen != "-- Select Correct Registry Mapping --":
-                    export_df.at[idx, "Resolved Clinical Name"] = chosen
-                    export_df.at[idx, "Match Protocol"] = "Layer 1: Human Override Confirmed"
-                    export_df.at[idx, "Confidence"] = "100.0% (Manual)"
-        else:
-            export_df = audit_results_df.drop(columns=["Raw_Confidence"]).copy()
+            current_cache = load_cache_db()
+            
+            for idx, row in exceptions_flagged.iterrows():
+                st.markdown(f"**SKU Source Target:** `{row['SKU']}` | **Corrupted Text Ingested:** *\"{row['Original Invoice Tag (Input)']}\"*")
+                chosen_mapping = st.selectbox(f"Assign Clean Standard Label (Item Code {row['SKU']}):", ["-- Choose Correct Field --"] + list(master_registry["generic_name"].unique()), key=f"train_{idx}")
+                
+                if chosen_mapping != "-- Choose Correct Field --":
+                    matched_row = master_registry[master_registry["generic_name"] == chosen_mapping]
+                    current_cache[row["Hash_Key"]] = {
+                        "generic_name": chosen_mapping,
+                        "brand_name": str(matched_row.iloc[0]["brand_name"]) if not matched_row.empty else "Generic",
+                        "system_id": str(matched_row.iloc[0]["system_id"]) if not matched_row.empty else "Manual",
+                        "manufacturer_id": row["Manufacturer / Wholesaler ID"]
+                    }
+                    
+            if st.button("Commit Training Rules & Override Exception Logs"):
+                save_cache_db(current_cache)
+                st.success("Rules written directly to Layer 1 local file! Re-running core...")
+                st.session_state.clear()
+                st.rerun()
 
         st.markdown("---")
-        st.markdown("#### 📤 Step 4: Export Verified Audit Logs")
-        csv_payload = export_df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Export Cleaned Audit Logs (.CSV)",
-            data=csv_payload,
-            file_name=f"apex_logic_audit_{selected_region.lower()}.csv",
-            mime="text/csv"
-        )
-
-    else:
-        st.write("---")
-        st.info("Waiting for data manifest asset drop. Use your testing spreadsheet configurations to verify pipeline mechanics.")
+        st.markdown("#### 📤 Export Verified Audit Logs")
+        st.download_button("📥 Download Verified Audit Logs (.CSV)", data=results_df.to_csv(index=False).encode('utf-8'), file_name=f"apex_logic_audit_{jurisdiction.lower()}.csv", mime="text/csv")
