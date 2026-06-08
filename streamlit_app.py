@@ -196,9 +196,9 @@ def call_layer3_ai_api(raw_text: str, jurisdiction: str, examples: list) -> dict
         
         user_prompt = f"Messy Input Text: \"{raw_text}\"\n\nValid system database options for context:\n{examples[:30]}"
         
-        # Uses Gemini 1.5 Flash - drop-in OpenAI client compatible
+        # Uses Gemini 2.5 Flash - drop-in OpenAI client compatible
         response = client.chat.completions.create(
-            model="gemini-1.5-flash", 
+            model="gemini-2.5-flash", 
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -264,9 +264,25 @@ def run_reconciliation_audit(client_df: pd.DataFrame, master_df: pd.DataFrame, j
             brand_out = cache_db[hash_key]["brand_name"]
             sys_id_out = cache_db[hash_key]["system_id"]
             mfr_id_out = cache_db[hash_key].get("manufacturer_id", wholesaler_id)
-            match_method = "Layer 1: Exact Registry Match"
+            match_method = "Layer 1: Local Cache Hit"
             
-        # --- TIER 2 SHIELD: HIGH SPEED ALGORTIHMIC VECTOR STRING MATCH ---
+        # --- TIER 1B SHIELD: EXACT REGISTRY MATCH ROUTINE ---
+        elif any(master_df["generic_name"].astype(str).str.lower() == normalised_input.lower()) or any(master_df["brand_name"].astype(str).str.lower() == normalised_input.lower()):
+            records = master_df[master_df["generic_name"].astype(str).str.lower() == normalised_input.lower()]
+            if records.empty:
+                records = master_df[master_df["brand_name"].astype(str).str.lower() == normalised_input.lower()]
+            
+            if not records.empty:
+                generic_out = str(records.iloc[0]["generic_name"])
+                brand_out = str(records.iloc[0]["brand_name"])
+                sys_id_out = str(records.iloc[0]["system_id"])
+            match_method = "Layer 1: Exact Registry Match"
+            score = 1.0
+            
+            cache_db[hash_key] = {"generic_name": generic_out, "brand_name": brand_out, "system_id": sys_id_out, "manufacturer_id": mfr_id_out}
+            save_cache_db(cache_db)
+            
+        # --- TIER 2 SHIELD: HIGH SPEED ALGORITHMIC VECTOR STRING MATCH ---
         elif tfidf_matrix is not None and len(normalised_input) > 0:
             # Look up calculations against the normalized variants
             raw_vec = vectorizer.transform([normalised_input])
@@ -287,7 +303,7 @@ def run_reconciliation_audit(client_df: pd.DataFrame, master_df: pd.DataFrame, j
                 cache_db[hash_key] = {"generic_name": generic_out, "brand_name": brand_out, "system_id": sys_id_out, "manufacturer_id": mfr_id_out}
                 save_cache_db(cache_db)
                 
-            # --- TIER 3 SHIELD: STRUCTURED OUT AI API FALLBACK (Protects 10,000-row volume) ---
+            # --- TIER 3 SHIELD: STRUCTURED OUT AI API FALLBACK ---
             else:
                 ai_res = call_layer3_ai_api(raw_input, jurisdiction, search_pool)
                 if "generic_name" in ai_res and ai_res["generic_name"] != "UNRESOLVED":
@@ -295,7 +311,7 @@ def run_reconciliation_audit(client_df: pd.DataFrame, master_df: pd.DataFrame, j
                     brand_out = ai_res["brand_name"]
                     sys_id_out = ai_res["system_id"]
                     mfr_id_out = ai_res.get("manufacturer_id", wholesaler_id)
-                    match_method = "Layer 3: AI Sandbox Resolution"
+                    match_method = "Layer 3: Gemini AI Sandbox"
                     
                     cache_db[hash_key] = {"generic_name": generic_out, "brand_name": brand_out, "system_id": sys_id_out, "manufacturer_id": mfr_id_out}
                     save_cache_db(cache_db)
@@ -308,9 +324,9 @@ def run_reconciliation_audit(client_df: pd.DataFrame, master_df: pd.DataFrame, j
         else:
             generic_out = "UNRESOLVED - REQUIRES HUMAN OVERRIDE"
             brand_out = "UNRESOLVED - REQUIRES HUMAN OVERRIDE"
+            sys_id_out = "FLAGGED"
             match_method = "Layer 3: Flagged Anomaly Exception"
             score = 0.0
-
         # --- AUTOMATED TARIFF COMPLIANCE EVALUATION ---
         baseline_tariff = 0.0
         audit_verdict = "Clearance Checked"
