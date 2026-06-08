@@ -170,13 +170,17 @@ def load_jurisdictional_registry(region_setting: str) -> pd.DataFrame:
 # =====================================================================
 def call_layer3_ai_api(raw_text: str, jurisdiction: str, examples: list) -> dict:
     """
-    [Phase 4: Layer 3 Fallback AI Engine] Enforces a rigid JSON format response
+    [Phase 4: Layer 3 Fallback AI Engine] Routes through OpenRouter to call Claude
     """
-    if "OPENAI_API_KEY" not in st.secrets:
+    if "OPENROUTER_API_KEY" not in st.secrets:
         return {"status": "failure"}
     
     try:
-        client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+        # Bypasses Stripe's block by using OpenRouter's gateway
+        client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=st.secrets["OPENROUTER_API_KEY"]
+        )
         
         system_prompt = (
             f"You are an expert clinical pharmacy database matching node for the {jurisdiction} market.\n"
@@ -192,8 +196,9 @@ def call_layer3_ai_api(raw_text: str, jurisdiction: str, examples: list) -> dict
         
         user_prompt = f"Messy Input Text: \"{raw_text}\"\n\nValid system database options for context:\n{examples[:30]}"
         
+        # Uses Claude 3.5 Haiku - incredibly fast and precise for structured JSON tasks
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="anthropic/claude-3.5-haiku", 
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
