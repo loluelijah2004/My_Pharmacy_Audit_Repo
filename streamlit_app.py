@@ -156,20 +156,24 @@ def load_global_master_registry(region: str) -> pd.DataFrame:
 
 import re as _re
 
-_ABBREV_MAP = {
-    "lisino":         "Lisinopril",
-    "amox/clav":      "Amoxicillin",
-    "amox":           "Amoxicillin",
-    "gaba":           "Gabapentin",
-    "atorva":         "Atorvastatin",
-    "simva":          "Simvastatin",
-    "ibu":            "Ibuprofen",
-    "para":           "Paracetamol",
-    "amlo":           "Amlodipine",
-    "levo":           "Levothyroxine",
-    "metoprolol tar": "Metoprolol",
-    "met":            "Metformin",
-}
+# Ordered list: longest/most-specific abbreviations first.
+# "metoprolol tar" must appear before "met" or "met" would consume it first.
+_ABBREV_MAP = [
+    ("amox/clav",      "Amoxicillin"),   # combo product
+    ("metoprolol tar", "Metoprolol"),
+    ("metoprolol",     "Metoprolol"),
+    ("metformin",      "Metformin"),     # full name variant — normalise case
+    ("lisino",         "Lisinopril"),
+    ("atorva",         "Atorvastatin"),
+    ("simva",          "Simvastatin"),
+    ("gaba",           "Gabapentin"),
+    ("ibu",            "Ibuprofen"),
+    ("para",           "Paracetamol"),
+    ("amlo",           "Amlodipine"),
+    ("levo",           "Levothyroxine"),
+    ("amox",           "Amoxicillin"),
+    ("met",            "Metformin"),     # keep last among "met*" — catches MET, MET ER etc.
+]
 
 _STRIP_PATTERN = _re.compile(
     r'\s*//\s*batch[-\s]?\w+'
@@ -183,7 +187,7 @@ def _normalise_drug_name(raw: str) -> str:
     name = _STRIP_PATTERN.sub(" ", raw).strip()
     name = " ".join(name.split())
     name_lower = name.lower()
-    for abbrev, full in _ABBREV_MAP.items():
+    for abbrev, full in _ABBREV_MAP:
         pattern = _re.compile(r'^' + _re.escape(abbrev) + r'(\s|$)', _re.IGNORECASE)
         if pattern.match(name_lower):
             remainder = pattern.sub("", name_lower).strip()
