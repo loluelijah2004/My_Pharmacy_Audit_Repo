@@ -444,7 +444,10 @@ with tab_webapp:
         st.markdown("---")
         st.markdown("#### ⚡ Live Reconciliation Audit Data Engine")
 
-        audit_cache_key = f"{uploaded_file.name}_{selected_region}_{confidence_threshold}"
+        # VERSION stamp: increment this any time the engine logic changes.
+        # This busts the session_state cache so the new code actually runs.
+        ENGINE_VERSION = "v3"
+        audit_cache_key = f"{ENGINE_VERSION}_{uploaded_file.name}_{selected_region}_{confidence_threshold}"
         if st.session_state.get("audit_cache_key") != audit_cache_key:
             with st.spinner("Executing sequence match calculations across regional master profiles..."):
                 st.session_state.audit_results = run_three_tier_shield_engine(
