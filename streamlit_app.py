@@ -432,18 +432,13 @@ def run_reconciliation(client_df: pd.DataFrame, master_df: pd.DataFrame,
 # 9. DISPLAY HELPER
 # =====================================================================
 def style_rows(row):
-    if "Flagged" in str(row["Match Layer"]) or "UNRESOLVED" in str(row["Generic Name"]):
-        return ['background-color: rgba(255,193,7,0.15); border-left: 4px solid #FFC107;'] * len(row)
-    if "OVERCHARGE" in str(row["Audit Verdict"]):
-        hi = 'background-color: rgba(255,87,34,0.18); color: #FF7777; font-weight: bold;'
-        cols = row.index.tolist()
-        styles = [''] * len(row)
-        for c in ["Invoice Price", "Price Variance", "Audit Verdict"]:
-            if c in cols:
-                styles[cols.index(c)] = hi
-        return styles
+    # Use .get() to safely check for multiple possible column names
+    match_layer = str(row.get("Match Layer", ""))
+    generic_name = str(row.get("Generic Name", row.get("generic_name", row.get("VMP Name", ""))))
+    
+    if "Flagged" in match_layer or "UNRESOLVED" in generic_name:
+        return ['background-color: #ffcccc'] * len(row)
     return [''] * len(row)
-
 
 # =====================================================================
 # 10. UI
