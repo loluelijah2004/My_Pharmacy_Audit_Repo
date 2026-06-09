@@ -33,16 +33,26 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+BASE_PATH = os.path.dirname(os.path.abspath(__file__))
+
 JURISDICTION_PROFILES = {
-    "UK":     {"csv_key": "UK",     "generic_label": "VMP Name",            "brand_label": "AMP Name",          "id_label": "VMP/AMP ID"},
-    "US":     {"csv_key": "US",     "generic_label": "Established Name",    "brand_label": "Proprietary Name",  "id_label": "NDC Number"},
-    "Canada": {"csv_key": "CANADA", "generic_label": "Active Ingredient",   "brand_label": "Brand Name",        "id_label": "DIN"},
+    "UK":     {"csv_key": "UK",     "data_dir": "uk", "generic_label": "VMP Name",            "brand_label": "AMP Name",          "id_label": "VMP/AMP ID"},
+    "US":     {"csv_key": "US",     "data_dir": "us", "generic_label": "Established Name",    "brand_label": "Proprietary Name",  "id_label": "NDC Number"},
+    "Canada": {"csv_key": "CANADA", "data_dir": "ca", "generic_label": "Active Ingredient",   "brand_label": "Brand Name",        "id_label": "DIN"},
+}
+
+# Regional synonym map — invoice abbreviations often use UK names on US invoices.
+REGIONAL_SYNONYMS = {
+    "US":     {"paracetamol": "acetaminophen"},
+    "UK":     {"acetaminophen": "paracetamol"},
+    "CANADA": {"paracetamol": "acetaminophen"},
 }
 
 # =====================================================================
 # 2. CACHE DATABASE (Layer 1 persistent store)
 # =====================================================================
-CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "layer1_cache_db.json")
+CACHE_FILE = os.path.join(BASE_PATH, "layer1_cache_db.json")
+ABBREV_FILE = os.path.join(BASE_PATH, "abbreviations.json")
 
 def load_cache_db() -> dict:
     if os.path.exists(CACHE_FILE):
@@ -61,55 +71,7 @@ def save_cache_db(data: dict):
         pass  # Streamlit Cloud read-only FS — fails silently, session cache still works
 
 # =====================================================================
-# 3. MASTER REGISTRY LOADER
-# =====================================================================
-@st.cache_data
-def _load_full_registry() -> pd.DataFrame:
-    base_path = os.path.dirname(os.path.abspath(__file__))
-    csv_path  = os.path.join(base_path, "master_registry.csv")
-    if not os.path.exists(csv_path):
-        return pd.DataFrame()
-    try:
-        df = pd.read_csv(csv_path)
-        df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
-        rename = {
-            "standard_name": "generic_name", "drug_name": "generic_name",
-            "active_ingredient": "generic_name", "vmp_name": "generic_name",
-            "amp_name": "brand_name", "proprietary_name": "brand_name", "product_name": "brand_name",
-            "regional_baseline_price": "baseline_price", "price": "baseline_price",
-            "unit_price": "baseline_price", "cost": "baseline_price",
-            "country": "region", "jurisdiction": "region", "market": "region",
-            "ndc": "system_id", "din": "system_id",
-        }
-        df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
-        df["region"] = df["region"].astype(str).str.strip().str.upper()
-        for col in ["generic_name", "brand_name", "baseline_price", "system_id"]:
-            if col not in df.columns:
-                df[col] = "N/A"
-        return df
-    except Exception:
-        return pd.DataFrame()
-
-
-def load_jurisdictional_registry(region: str) -> pd.DataFrame:
-    full_df    = _load_full_registry()
-    target_key = JURISDICTION_PROFILES.get(region, {}).get("csv_key", region.upper())
-    if full_df.empty:
-        st.sidebar.error("❌ master_registry.csv not found or could not be read.")
-        return pd.DataFrame(columns=["generic_name", "brand_name", "baseline_price", "system_id"])
-    filtered = full_df[full_df["region"] == target_key].copy().reset_index(drop=True)
-    if filtered.empty:
-        st.sidebar.warning(f"⚠️ No entries for region '{target_key}'.")
-    else:
-        st.sidebar.success(f"✅ {len(filtered)} drugs loaded for {region}.")
-    return filtered
-
-
-# =====================================================================
-# 4. PHASE 1 — NOISE STRIPPING
-#    Uses \b word boundaries so "20MG" is stripped but "LISINO" is not.
-#    BUG FIX: Previous version used space-padded alternation which failed
-#    to strip tokens at start/end of string and on Python 3.14.
+# 3. NOISE STRIPPING (used by registry normalisation + Layer 1)
 # =====================================================================
 _STRIP_NOISE = re.compile(
     r'\s*//\s*batch[-\s]?\w+'                              # // BATCH-42
@@ -122,57 +84,223 @@ _STRIP_NOISE = re.compile(
 def strip_noise(raw: str) -> str:
     """Strip batch codes, dosage strengths, and dosage form words."""
     name = _STRIP_NOISE.sub(" ", raw).strip()
-    # Remove isolated SINGLE characters only — do NOT remove letters from inside words.
-    # BUG FIX: Previous r'[a-zA-Z]' removed ALL letters. r'\b[a-zA-Z]\b' removes only
-    # standalone single-char tokens like a trailing "T" from "PANTOPRAZOLE 40MG T".
     name = re.sub(r'\b[a-zA-Z]\b', '', name).strip()
     return " ".join(name.split())
 
 
 # =====================================================================
-# 5. PHASE 2 — LAYER 1: DETERMINISTIC ABBREVIATION LOOKUP
+# 4. MASTER REGISTRY LOADER
+#    master_registry.csv has baseline prices but omits many common drugs.
+#    Regional FDA / NHS / DPD files supplement the searchable drug list.
+# =====================================================================
+_COL_RENAME = {
+    "standard_name": "generic_name", "drug_name": "generic_name",
+    "active_ingredient": "generic_name", "vmp_name": "generic_name",
+    "amp_name": "brand_name", "proprietary_name": "brand_name", "product_name": "brand_name",
+    "regional_baseline_price": "baseline_price", "price": "baseline_price",
+    "unit_price": "baseline_price", "cost": "baseline_price",
+    "country": "region", "jurisdiction": "region", "market": "region",
+    "ndc": "system_id", "din": "system_id",
+}
+
+_SALT_SUFFIX = re.compile(
+    r'\s+(?:hydrochloride|hcl|hci|sodium|potassium|maleate|tartrate|besylate|'
+    r'fumarate|succinate|acetate|sulfate|sulphate|phosphate|nitrate|bromide|'
+    r'mononitrate|dihydrate|anhydrous|mesylate|lactate|citrate)\b.*$',
+    re.IGNORECASE
+)
+
+
+def _normalize_registry_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+    df = df.rename(columns={k: v for k, v in _COL_RENAME.items() if k in df.columns})
+    if "region" in df.columns:
+        df["region"] = df["region"].astype(str).str.strip().str.upper()
+    for col in ["generic_name", "brand_name", "baseline_price", "system_id"]:
+        if col not in df.columns:
+            df[col] = "N/A"
+    return df
+
+
+def _base_ingredient(name: str) -> str:
+    """Reduce a registry label to a matchable ingredient token."""
+    text = strip_noise(str(name))
+    text = _SALT_SUFFIX.sub("", text).strip()
+    text = re.split(r"[/+]", text)[0].strip()
+    return " ".join(w.capitalize() for w in text.split())
+
+
+@st.cache_data
+def _load_full_registry() -> pd.DataFrame:
+    csv_path = os.path.join(BASE_PATH, "master_registry.csv")
+    if not os.path.exists(csv_path):
+        return pd.DataFrame()
+    try:
+        return _normalize_registry_columns(pd.read_csv(csv_path))
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data
+def _load_regional_supplement(region_key: str, data_dir: str) -> pd.DataFrame:
+    """Load FDA / NHS / DPD regional file to fill gaps in master_registry."""
+    path = os.path.join(BASE_PATH, "data", data_dir, f"master_{data_dir}.csv")
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    try:
+        df = _normalize_registry_columns(pd.read_csv(path))
+        df["region"] = region_key
+        base_map = {n: _base_ingredient(n) for n in df["generic_name"].dropna().unique()}
+        df["_base"] = df["generic_name"].map(base_map)
+        df = df.dropna(subset=["_base"])
+        df = df[df["_base"].str.len() >= 3]
+        df["generic_name"] = df["_base"]
+        df = df.drop_duplicates(subset=["generic_name"], keep="first")
+        return df.drop(columns=["_base"])
+    except Exception:
+        return pd.DataFrame()
+
+
+def load_jurisdictional_registry(region: str) -> pd.DataFrame:
+    profile    = JURISDICTION_PROFILES.get(region, {})
+    target_key = profile.get("csv_key", region.upper())
+    data_dir   = profile.get("data_dir", region.lower())
+
+    base_df = _load_full_registry()
+    base_reg = (
+        base_df[base_df["region"] == target_key].copy()
+        if not base_df.empty else
+        pd.DataFrame(columns=["generic_name", "brand_name", "baseline_price", "system_id", "region"])
+    )
+
+    supplement = _load_regional_supplement(target_key, data_dir)
+    if supplement.empty and base_reg.empty:
+        st.sidebar.error("❌ No registry data found for this region.")
+        return pd.DataFrame(columns=["generic_name", "brand_name", "baseline_price", "system_id"])
+
+    if base_reg.empty:
+        merged = supplement
+    elif supplement.empty:
+        merged = base_reg
+    else:
+        # Prefer master_registry baseline prices; add regional drugs not in baseline file.
+        base_names = set(base_reg["generic_name"].str.lower())
+        extra = supplement[~supplement["generic_name"].str.lower().isin(base_names)]
+        merged = pd.concat([base_reg, extra], ignore_index=True)
+
+    merged = merged.drop_duplicates(subset=["generic_name"], keep="first").reset_index(drop=True)
+    st.sidebar.success(
+        f"✅ {len(merged):,} drugs loaded for {region} "
+        f"({len(base_reg):,} priced + {max(0, len(merged) - len(base_reg)):,} regional)."
+    )
+    return merged
+
+
+@st.cache_data
+def build_registry_index(_registry_key: str, generic_names: tuple) -> dict[str, int]:
+    """Maps normalized ingredient tokens to row indices for O(1) Layer 1 resolution."""
+    index: dict[str, int] = {}
+    synonyms = REGIONAL_SYNONYMS.get(_registry_key, {})
+
+    for i, generic in enumerate(generic_names):
+        generic = str(generic)
+        keys = {generic.lower(), _base_ingredient(generic).lower()}
+        for key in keys:
+            if not key:
+                continue
+            if key not in index or len(generic) < len(str(generic_names[index[key]])):
+                index[key] = i
+            alt = synonyms.get(key)
+            if alt and (alt not in index or len(generic) < len(str(generic_names[index[alt]]))):
+                index[alt] = i
+        # First-token index: prefer the shortest matching registry name
+        first = generic.lower().split()[0] if generic.split() else ""
+        if first and (first not in index or len(generic) < len(str(generic_names[index[first]]))):
+            index[first] = i
+    return index
+
+
+def resolve_in_registry(
+    candidate: str, master_df: pd.DataFrame, registry_index: dict[str, int], region_key: str
+) -> tuple[str | None, int | None]:
+    """Map an abbreviation or cleaned token to the best registry row."""
+    if not candidate or master_df.empty:
+        return None, None
+
+    synonyms = REGIONAL_SYNONYMS.get(region_key, {})
+    probes = [
+        candidate.lower().strip(),
+        _base_ingredient(candidate).lower(),
+        synonyms.get(candidate.lower().strip(), ""),
+    ]
+    first_word = candidate.lower().strip().split()[0] if candidate.split() else ""
+    if first_word:
+        probes.append(first_word)
+
+    for probe in probes:
+        if probe and probe in registry_index:
+            idx = registry_index[probe]
+            return str(master_df.iloc[idx]["generic_name"]), idx
+
+    # Prefix: registry name extends the probe (e.g. "lisinopril" → "lisinopril hydrochloride")
+    best_idx, best_len = None, 0
+    for probe in probes:
+        if not probe or len(probe) < 4:
+            continue
+        for key, idx in registry_index.items():
+            if key.startswith(probe) and len(key) > best_len:
+                best_idx, best_len = idx, len(key)
+    if best_idx is not None:
+        return str(master_df.iloc[best_idx]["generic_name"]), best_idx
+    return None, None
+
+
+# =====================================================================
+# 5. LAYER 1: DETERMINISTIC ABBREVIATION LOOKUP
 #    Loads custom abbreviations from an external abbreviations.json file.
 # =====================================================================
 
 @st.cache_data
-def generate_automatic_prefixes(registry_df):
-    auto_lookup = {}
-    for name in registry_df['generic_name'].dropna().unique():
-        clean_name = str(name).lower().strip()
-        # If the drug name is long enough, auto-create a prefix shorthand
-        if len(clean_name) > 6:
-            prefix_4 = clean_name[:4]
-            prefix_5 = clean_name[:5]
-            prefix_6 = clean_name[:6]
-            
-            # Map them back to the canonical proper name
-            auto_lookup[prefix_4] = name
-            auto_lookup[prefix_5] = name
-            auto_lookup[prefix_6] = name
-    return auto_lookup
-    
-def load_abbreviations() -> dict:
-    """Loads abbreviation dictionary from an external JSON file."""
+def _load_abbrev_dict() -> dict:
     try:
-        with open("abbreviations.json", "r", encoding="utf-8") as f:
+        with open(ABBREV_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except FileNotFoundError:
-        # Fallback if the file doesn't exist yet
-        st.warning("⚠️ abbreviations.json file not found! Operating without manual overrides.")
         return {}
 
-# Load the dictionary into memory
-_ABBREV_DICT = load_abbreviations()
 
-def abbrev_lookup(clean_token: str) -> str | None:
+# Wholesaler shorthands that collide with obscure registry ingredient names.
+_PHARMA_OVERRIDES = {
+    "gaba": "Gabapentin", "gab": "Gabapentin",
+    "para": "Paracetamol", "pcm": "Paracetamol",
+    "met": "Metformin", "amox": "Amoxicillin",
+    "lisino": "Lisinopril", "atorva": "Atorvastatin",
+    "simva": "Simvastatin", "ibu": "Ibuprofen", "amlo": "Amlodipine",
+}
+
+
+@st.cache_data
+def _build_abbrev_lookup(registry_key: str, registry_names: tuple) -> tuple:
+    """Merge JSON abbreviations with auto-generated registry prefixes."""
+    combined = dict(_load_abbrev_dict())
+    for name in registry_names:
+        clean = str(name).lower().strip()
+        if len(clean) <= 6 or "(" in clean or len(clean) > 40:
+            continue
+        for n in (4, 5, 6):
+            combined.setdefault(clean[:n], str(name))
+    combined.update(_PHARMA_OVERRIDES)
+    # Longest keys first for greedy prefix matching
+    sorted_items = tuple(sorted(combined.items(), key=lambda x: len(x[0]), reverse=True))
+    return sorted_items
+
+
+def abbrev_lookup(clean_token: str, abbrev_items: tuple) -> str | None:
     """Returns canonical name if token matches a known abbreviation, else None."""
     t = clean_token.lower().strip()
-    
-    # Sort keys longest-first so compound terms match before short roots
-    sorted_items = sorted(_ABBREV_DICT.items(), key=lambda x: len(x[0]), reverse=True)
-    
-    for abbrev, full_name in sorted_items:
-        if re.match(r'^' + re.escape(abbrev.lower().strip()) + r'(\s|$)', t, re.IGNORECASE):
+    for abbrev, full_name in abbrev_items:
+        if re.match(r'^' + re.escape(abbrev.lower().strip()) + r'(\s|/|$)', t, re.IGNORECASE):
             return full_name
     return None
 
@@ -196,35 +324,38 @@ def build_tfidf_index(registry_key: str, registry_names: tuple):
     return vectorizer, matrix
 
 
-def tfidf_match(clean_token: str, master_df: pd.DataFrame,
-                region_key: str, threshold: float) -> tuple[str | None, float]:
-    """
-    Vectorises the query against the full registry matrix in one shot.
-    Returns (matched_generic_name, score) or (None, best_score).
-    """
-    if master_df.empty or not clean_token.strip():
-        return None, 0.0
+def tfidf_match_batch(
+    clean_tokens: list[str],
+    master_df: pd.DataFrame,
+    region_key: str,
+    threshold: float,
+) -> list[tuple[str | None, float]]:
+    """Batch TF-IDF match — one matrix multiply for all unresolved rows."""
+    n = len(clean_tokens)
+    if master_df.empty or n == 0:
+        return [(None, 0.0)] * n
 
-    # Build lookup pool from generic + brand names combined
-    master_df = master_df.copy()
-    master_df["_pool"] = (
-        master_df["generic_name"].astype(str) + " " +
-        master_df["brand_name"].astype(str)
-    ).str.strip()
+    pool_list = (
+        master_df["generic_name"].astype(str) + " " + master_df["brand_name"].astype(str)
+    ).str.strip().tolist()
 
-    pool_list = master_df["_pool"].tolist()
     try:
         vectorizer, matrix = build_tfidf_index(region_key, tuple(pool_list))
-        query_vec = vectorizer.transform([clean_token.lower()])
-        scores    = cosine_similarity(query_vec, matrix).flatten()
-        best_idx  = int(np.argmax(scores))
-        best_score = float(scores[best_idx])
-
-        if best_score >= threshold:
-            return str(master_df.iloc[best_idx]["generic_name"]), best_score
-        return None, best_score
+        results: list[tuple[str | None, float]] = []
+        chunk_size = 2000
+        for start in range(0, n, chunk_size):
+            queries = [t.lower() for t in clean_tokens[start:start + chunk_size]]
+            score_matrix = cosine_similarity(vectorizer.transform(queries), matrix)
+            for row_scores in score_matrix:
+                best_idx   = int(np.argmax(row_scores))
+                best_score = float(row_scores[best_idx])
+                if best_score >= threshold:
+                    results.append((str(master_df.iloc[best_idx]["generic_name"]), best_score))
+                else:
+                    results.append((None, best_score))
+        return results
     except Exception:
-        return None, 0.0
+        return [(None, 0.0)] * n
 
 
 # =====================================================================
@@ -269,10 +400,17 @@ def call_gemini_api(raw_input: str, clean_token: str,
             temperature=0.0
         )
         result = json.loads(response.choices[0].message.content)
-        # Validate resolved name is actually in registry
-        if result.get("resolved_name") and result["resolved_name"] not in registry_names:
-            result["resolved_name"] = None
-            result["confidence"]    = 0.0
+        if result.get("resolved_name"):
+            validated = result["resolved_name"]
+            if validated not in registry_names:
+                # Accept case-insensitive or synonym-normalised registry hits
+                lower_map = {n.lower(): n for n in registry_names}
+                validated = lower_map.get(validated.lower())
+            if not validated:
+                result["resolved_name"] = None
+                result["confidence"]    = 0.0
+            else:
+                result["resolved_name"] = validated
         return result
     except Exception as e:
         return {"status": "error", "reason": str(e)}
@@ -290,139 +428,166 @@ def run_reconciliation(client_df: pd.DataFrame, master_df: pd.DataFrame,
       Phase 2  — Check persistent hash cache (Layer 1 instant hit)
       Phase 3  — Abbreviation dictionary lookup (Layer 1 deterministic)
       Phase 4  — Exact name match on cleaned token (Layer 1)
-      Phase 5  — TF-IDF cosine similarity (Layer 2)
+      Phase 5  — TF-IDF cosine similarity (Layer 2, batched)
       Phase 6  — Gemini AI fallback (Layer 3)
       Phase 7  — Audit: compare invoice price vs registry baseline
     """
-    registry_names = master_df["generic_name"].tolist()
-    region_key     = JURISDICTION_PROFILES.get(jurisdiction, {}).get("csv_key", jurisdiction)
+    n_rows = len(client_df)
+    if n_rows == 0 or master_df.empty:
+        return pd.DataFrame()
+
+    region_key      = JURISDICTION_PROFILES.get(jurisdiction, {}).get("csv_key", jurisdiction)
+    registry_index  = build_registry_index(region_key, tuple(master_df["generic_name"].tolist()))
+    registry_names  = master_df["generic_name"].tolist()
+    abbrev_items    = _build_abbrev_lookup(region_key, tuple(registry_names))
 
     cache_db = load_cache_db()
     if "ai_cache" not in st.session_state:
         st.session_state["ai_cache"] = {}
 
-    rows = []
+    # Pre-allocate per-row state (avoids repeated DataFrame scans)
+    skus           = [""] * n_rows
+    raw_inputs     = [""] * n_rows
+    clean_tokens   = [""] * n_rows
+    hash_keys      = [""] * n_rows
+    wholesaler_ids = [""] * n_rows
+    invoice_prices = [0.0] * n_rows
+    resolved       = [None] * n_rows
+    match_layers   = [""] * n_rows
+    confidences    = [0.0] * n_rows
+    brand_names    = ["N/A"] * n_rows
+    system_ids     = ["N/A"] * n_rows
+    cache_dirty    = False
 
-    for idx, row in client_df.iterrows():
-
-        # ── Identify SKU ─────────────────────────────────────────────
-        sku = (
-            str(row["SKU"])             if "SKU"             in row.index and pd.notna(row["SKU"])
-            else str(row["Distributor_SKU"]) if "Distributor_SKU" in row.index and pd.notna(row["Distributor_SKU"])
+    # ── Pass 1: ingest + Layer 1 (cache, abbrev, exact) ──────────────
+    for i, row in enumerate(client_df.itertuples(index=True)):
+        idx = row.Index
+        skus[i] = (
+            str(getattr(row, "SKU", ""))
+            if hasattr(row, "SKU") and pd.notna(getattr(row, "SKU", None))
+            else str(getattr(row, "Distributor_SKU", f"LINE_{idx}"))
+            if hasattr(row, "Distributor_SKU") and pd.notna(getattr(row, "Distributor_SKU", None))
             else f"LINE_{idx}"
         )
+        raw_inputs[i]     = str(getattr(row, "Client_Drug_Name", "")).strip()
+        wholesaler_ids[i] = str(getattr(row, "Wholesaler_ID", getattr(row, "Supplier", "GENERIC_MFR"))).strip()
+        invoice_prices[i] = float(getattr(row, "Client_Current_Price", 0.0))
+        clean_tokens[i]   = strip_noise(raw_inputs[i])
+        hash_keys[i]      = hashlib.md5(f"{wholesaler_ids[i]}||{raw_inputs[i]}".lower().encode()).hexdigest()
 
-        raw_input      = str(row.get("Client_Drug_Name", "")).strip()
-        wholesaler_id  = str(row.get("Wholesaler_ID", row.get("Supplier", "GENERIC_MFR"))).strip()
-        invoice_price  = float(row.get("Client_Current_Price", 0.0))
-
-        # ── Phase 1: Strip noise ──────────────────────────────────────
-        clean_token = strip_noise(raw_input)
-
-        # ── Phase 2: Hash cache lookup ────────────────────────────────
-        hash_key   = hashlib.md5(f"{wholesaler_id}||{raw_input}".lower().encode()).hexdigest()
-        cached     = cache_db.get(hash_key) or st.session_state["ai_cache"].get(hash_key)
-
-        resolved_name = None
-        brand_name    = "N/A"
-        system_id     = "N/A"
-        match_layer   = ""
-        confidence    = 0.0
-
+        cached = cache_db.get(hash_keys[i]) or st.session_state["ai_cache"].get(hash_keys[i])
         if cached:
-            resolved_name = cached.get("generic_name", "")
-            brand_name    = cached.get("brand_name", "N/A")
-            system_id     = cached.get("system_id", "N/A")
-            match_layer   = "Layer 1: Cache Hit"
-            confidence    = 1.0
+            resolved[i]     = cached.get("generic_name", "")
+            brand_names[i]  = cached.get("brand_name", "N/A")
+            system_ids[i]   = cached.get("system_id", "N/A")
+            match_layers[i] = "Layer 1: Cache Hit"
+            confidences[i]  = 1.0
+            continue
 
-        # ── Phase 3: Abbreviation dictionary ─────────────────────────
-        if not resolved_name:
-            abbrev_result = abbrev_lookup(clean_token)
-            if abbrev_result and abbrev_result in registry_names:
-                resolved_name = abbrev_result
-                match_layer   = "Layer 1: Abbreviation Lookup"
-                confidence    = 1.0
+        abbrev_result = abbrev_lookup(clean_tokens[i], abbrev_items)
+        if abbrev_result:
+            name, reg_idx = resolve_in_registry(abbrev_result, master_df, registry_index, region_key)
+            if name:
+                resolved[i]     = name
+                match_layers[i] = "Layer 1: Abbreviation Lookup"
+                confidences[i]  = 1.0
+                brand_names[i]  = str(master_df.iloc[reg_idx]["brand_name"])
+                system_ids[i]   = str(master_df.iloc[reg_idx]["system_id"])
+                continue
 
-        # ── Phase 4: Exact name match ─────────────────────────────────
-        if not resolved_name:
-            exact = master_df[master_df["generic_name"].str.lower() == clean_token.lower()]
-            if not exact.empty:
-                resolved_name = str(exact.iloc[0]["generic_name"])
-                brand_name    = str(exact.iloc[0]["brand_name"])
-                system_id     = str(exact.iloc[0]["system_id"])
-                match_layer   = "Layer 1: Exact Name Match"
-                confidence    = 1.0
+        name, reg_idx = resolve_in_registry(clean_tokens[i], master_df, registry_index, region_key)
+        if name:
+            resolved[i]     = name
+            match_layers[i] = "Layer 1: Exact Name Match"
+            confidences[i]  = 1.0
+            brand_names[i]  = str(master_df.iloc[reg_idx]["brand_name"])
+            system_ids[i]   = str(master_df.iloc[reg_idx]["system_id"])
 
-        # ── Phase 5: TF-IDF cosine similarity ─────────────────────────
-        if not resolved_name:
-            tfidf_name, tfidf_score = tfidf_match(clean_token, master_df, region_key, l2_threshold)
+    # ── Pass 2: Layer 2 TF-IDF (batched) ─────────────────────────────
+    l2_pending = [i for i in range(n_rows) if not resolved[i]]
+    if l2_pending:
+        batch_tokens = [clean_tokens[i] for i in l2_pending]
+        batch_hits   = tfidf_match_batch(batch_tokens, master_df, region_key, l2_threshold)
+        for i, (tfidf_name, tfidf_score) in zip(l2_pending, batch_hits):
             if tfidf_name:
-                resolved_name = tfidf_name
-                match_layer   = "Layer 2: TF-IDF Cosine Match"
-                confidence    = tfidf_score
-                # Write to cache so this exact input resolves instantly next time
-                reg_row = master_df[master_df["generic_name"] == tfidf_name]
-                cache_db[hash_key] = {
+                reg_row = master_df[master_df["generic_name"] == tfidf_name].iloc[0]
+                resolved[i]     = tfidf_name
+                match_layers[i] = "Layer 2: TF-IDF Cosine Match"
+                confidences[i]  = tfidf_score
+                brand_names[i]  = str(reg_row["brand_name"])
+                system_ids[i]   = str(reg_row["system_id"])
+                cache_db[hash_keys[i]] = {
                     "generic_name": tfidf_name,
-                    "brand_name":   str(reg_row.iloc[0]["brand_name"]) if not reg_row.empty else "N/A",
-                    "system_id":    str(reg_row.iloc[0]["system_id"])  if not reg_row.empty else "N/A",
+                    "brand_name":   brand_names[i],
+                    "system_id":    system_ids[i],
                 }
-                save_cache_db(cache_db)
+                cache_dirty = True
 
-        # ── Phase 6: AI fallback ──────────────────────────────────────
-        if not resolved_name and use_ai:
-            ai_result = call_gemini_api(raw_input, clean_token, registry_names, jurisdiction)
+    # ── Pass 3: Layer 3 AI (only unresolved) ─────────────────────────
+    if use_ai:
+        for i in range(n_rows):
+            if resolved[i]:
+                continue
+            ai_result = call_gemini_api(raw_inputs[i], clean_tokens[i], registry_names, jurisdiction)
             if ai_result.get("resolved_name"):
-                resolved_name = ai_result["resolved_name"]
-                match_layer   = "Layer 3: AI Resolution"
-                confidence    = float(ai_result.get("confidence", 0.0))
-                reg_row = master_df[master_df["generic_name"] == resolved_name]
+                ai_name = ai_result["resolved_name"]
+                reg_row = master_df[master_df["generic_name"] == ai_name]
+                resolved[i]     = ai_name
+                match_layers[i] = "Layer 3: AI Resolution"
+                confidences[i]  = float(ai_result.get("confidence", 0.0))
+                brand_names[i]  = str(reg_row.iloc[0]["brand_name"]) if not reg_row.empty else "N/A"
+                system_ids[i]   = str(reg_row.iloc[0]["system_id"])  if not reg_row.empty else "N/A"
                 entry = {
-                    "generic_name": resolved_name,
-                    "brand_name":   str(reg_row.iloc[0]["brand_name"]) if not reg_row.empty else "N/A",
-                    "system_id":    str(reg_row.iloc[0]["system_id"])  if not reg_row.empty else "N/A",
+                    "generic_name": ai_name,
+                    "brand_name":   brand_names[i],
+                    "system_id":    system_ids[i],
                 }
-                cache_db[hash_key] = entry
-                st.session_state["ai_cache"][hash_key] = entry
-                save_cache_db(cache_db)
+                cache_db[hash_keys[i]] = entry
+                st.session_state["ai_cache"][hash_keys[i]] = entry
+                cache_dirty = True
 
-        # ── Unresolved ────────────────────────────────────────────────
+    if cache_dirty:
+        save_cache_db(cache_db)
+
+    # ── Pass 4: flag unresolved + price audit ───────────────────────
+    rows = []
+    for i in range(n_rows):
+        resolved_name = resolved[i]
         if not resolved_name:
             resolved_name = "UNRESOLVED — HUMAN OVERRIDE REQUIRED"
-            match_layer   = "Layer 3: Flagged Exception"
-            confidence    = 0.0
-
-        # ── Phase 7: Audit ────────────────────────────────────────────
-        if "UNRESOLVED" not in resolved_name:
-            reg_row        = master_df[master_df["generic_name"] == resolved_name]
-            brand_name     = str(reg_row.iloc[0]["brand_name"]) if not reg_row.empty else "N/A"
-            system_id      = str(reg_row.iloc[0]["system_id"])  if not reg_row.empty else "N/A"
-            baseline_price = float(reg_row.iloc[0]["baseline_price"]) if not reg_row.empty else 0.0
+            match_layers[i] = "Layer 3: Flagged Exception"
+            confidences[i]  = 0.0
+            baseline_price  = 0.0
         else:
-            baseline_price = 0.0
+            reg_row = master_df[master_df["generic_name"] == resolved_name]
+            if not reg_row.empty:
+                brand_names[i]  = str(reg_row.iloc[0]["brand_name"])
+                system_ids[i]   = str(reg_row.iloc[0]["system_id"])
+                baseline_price  = float(reg_row.iloc[0]["baseline_price"])
+            else:
+                baseline_price = 0.0
 
-        variance     = (invoice_price - baseline_price) if baseline_price > 0 else 0.0
+        variance     = (invoice_prices[i] - baseline_price) if baseline_price > 0 else 0.0
         variance_pct = (variance / baseline_price * 100) if baseline_price > 0 else 0.0
         verdict      = "🚨 TARIFF OVERCHARGE" if variance > 0.05 else "✅ Clearance Checked"
 
         rows.append({
-            "SKU":                         sku,
-            "Original Invoice Tag":        raw_input,
-            "Cleaned Token":               clean_token,
-            "Generic Name":                resolved_name,
-            "Brand Name":                  brand_name,
-            "Wholesaler ID":               wholesaler_id,
-            "System ID":                   system_id,
-            "Match Layer":                 match_layer,
-            "Confidence":                  f"{confidence * 100:.1f}%",
-            "Invoice Price":               invoice_price,
-            "Registry Baseline":           baseline_price,
-            "Price Variance":              variance,
-            "Variance %":                  variance_pct,
-            "Audit Verdict":               verdict,
-            "_raw_score":                  confidence,
-            "_hash":                       hash_key,
+            "SKU":                  skus[i],
+            "Original Invoice Tag": raw_inputs[i],
+            "Cleaned Token":        clean_tokens[i],
+            "Generic Name":         resolved_name,
+            "Brand Name":           brand_names[i],
+            "Wholesaler ID":        wholesaler_ids[i],
+            "System ID":            system_ids[i],
+            "Match Layer":          match_layers[i],
+            "Confidence":           f"{confidences[i] * 100:.1f}%",
+            "Invoice Price":        invoice_prices[i],
+            "Registry Baseline":    baseline_price,
+            "Price Variance":       variance,
+            "Variance %":           variance_pct,
+            "Audit Verdict":        verdict,
+            "_raw_score":           confidences[i],
+            "_hash":                hash_keys[i],
         })
 
     return pd.DataFrame(rows)
@@ -561,6 +726,13 @@ with tab_workspace:
             .str.replace(r"[^\d.]", "", regex=True)
             .replace("", "0").astype(float)
         )
+        sku_col = next(
+            (c for c in raw_columns
+             if normalized_map[c] in ("sku", "vendorsku", "distributorsku", "productcode", "itemcode")),
+            None
+        )
+        if sku_col:
+            working_df["SKU"] = client_data[sku_col].astype(str)
         st.toast("✅ Invoice ingested — running pipeline...", icon="⚡")
 
         # Run pipeline
