@@ -1,6 +1,10 @@
 {
     "amox/clav": "Amoxicillin",
-    "metf": "Metformin",
-    "lisinop": "Lisinopril",
-    "levo": "Levothyroxine"
+    "co-amoxiclav": "Amoxicillin",
+    "pcm": "Paracetamol",
+    "pcm/cod": "Co-codamol",
+    "para": "Paracetamol",
+    "ibu": "Ibuprofen",
+    "gaba": "Gabapentin",
+    "hctz": "Hydrochlorothiazide"
 }
