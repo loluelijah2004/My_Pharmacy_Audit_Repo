@@ -135,6 +135,22 @@ def strip_noise(raw: str) -> str:
 # =====================================================================
 
 @st.cache_data
+def generate_automatic_prefixes(registry_df):
+    auto_lookup = {}
+    for name in registry_df['generic_name'].dropna().unique():
+        clean_name = str(name).lower().strip()
+        # If the drug name is long enough, auto-create a prefix shorthand
+        if len(clean_name) > 6:
+            prefix_4 = clean_name[:4]
+            prefix_5 = clean_name[:5]
+            prefix_6 = clean_name[:6]
+            
+            # Map them back to the canonical proper name
+            auto_lookup[prefix_4] = name
+            auto_lookup[prefix_5] = name
+            auto_lookup[prefix_6] = name
+    return auto_lookup
+    
 def load_abbreviations() -> dict:
     """Loads abbreviation dictionary from an external JSON file."""
     try:
