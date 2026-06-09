@@ -720,11 +720,7 @@ def run_reconciliation(client_df: pd.DataFrame, master_df: pd.DataFrame,
     if cache_dirty:
         save_cache_db(cache_db)
 
-    # Store diagnostics in session state if verbose
-    if verbose and diagnostics:
-        st.session_state["diagnostics"] = diagnostics
-
-    return pd.DataFrame(rows)
+    # ── Pass 4: flag unresolved + price audit ───────────────────────
     rows = []
     for i in range(n_rows):
         resolved_name = resolved[i]
@@ -769,6 +765,10 @@ def run_reconciliation(client_df: pd.DataFrame, master_df: pd.DataFrame,
             "_raw_score":           confidences[i],
             "_hash":                hash_keys[i],
         })
+
+    # Store diagnostics in session state if verbose
+    if verbose and diagnostics:
+        st.session_state["diagnostics"] = diagnostics
 
     return pd.DataFrame(rows)
 
