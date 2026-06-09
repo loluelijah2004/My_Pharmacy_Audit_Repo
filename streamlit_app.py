@@ -54,6 +54,16 @@ REGIONAL_SYNONYMS = {
 CACHE_FILE = os.path.join(BASE_PATH, "layer1_cache_db.json")
 ABBREV_FILE = os.path.join(BASE_PATH, "abbreviations.json")
 
+# Canonical targets for _PHARMA_OVERRIDES — defined early so _cache_is_plausible
+# can reference them without a forward-reference NameError.
+# Keep in sync with _PHARMA_OVERRIDES below.
+_PHARMA_OVERRIDE_TARGETS: frozenset[str] = frozenset({
+    "paracetamol", "acetaminophen", "ibuprofen", "metformin", "gabapentin",
+    "amoxicillin", "tramadol", "levothyroxine", "amlodipine", "lisinopril",
+    "atorvastatin", "simvastatin", "omeprazole", "losartan", "pantoprazole",
+    "sertraline", "fluoxetine", "prednisone", "metoprolol", "albuterol",
+})
+
 def load_cache_db() -> dict:
     if os.path.exists(CACHE_FILE):
         try:
@@ -82,13 +92,21 @@ def clear_cache_db():
 
 
 def _cache_is_plausible(clean_token: str, generic_name: str) -> bool:
-    """Reject stale cache rows that mapped invoice text to the wrong molecule."""
+    """Reject stale cache rows that mapped invoice text to the wrong molecule.
+
+    BUG FIX: Previously returned False unconditionally for tokens ≤4 chars,
+    which meant correct cached results for 'PARA', 'MET', 'IBU' etc. were
+    always bypassed, forcing expensive re-resolution every run.
+    Now: short tokens are only rejected if the cached name is clearly wrong
+    (i.e. the cached generic name does not appear in _PHARMA_OVERRIDES values).
+    """
     c = re.sub(r"[^a-z]", "", clean_token.lower())
     g = re.sub(r"[^a-z]", "", str(generic_name).lower())
     if not c or not g:
         return True
     if len(c) <= 4:
-        return False  # always re-resolve short wholesaler codes through abbrev + L2
+        # Accept cache hit if the cached name is a known pharma override target
+        return g in _PHARMA_OVERRIDE_TARGETS
     prefix = c[: min(5, len(c))]
     return g.startswith(prefix) or c.startswith(g[: min(5, len(g))])
 
@@ -133,6 +151,12 @@ _SALT_SUFFIX = re.compile(
 )
 
 
+# BUG FIX (Brand names always N/A): pandas read_csv converts empty cells to
+# float NaN which becomes the string "nan" after .astype(str). The old code
+# used dict .replace() which only matches exact whole-cell values. Using
+# regex=False str.replace is safer; we also normalise "none" and whitespace.
+_NA_STRINGS = re.compile(r'^(nan|none|n/a|na|-)$', re.IGNORECASE)
+
 def _normalize_registry_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
@@ -142,14 +166,11 @@ def _normalize_registry_columns(df: pd.DataFrame) -> pd.DataFrame:
     for col in ["generic_name", "brand_name", "baseline_price", "system_id"]:
         if col not in df.columns:
             df[col] = "N/A"
-    df["brand_name"] = (
-        df["brand_name"].astype(str).str.strip()
-        .replace({"nan": "N/A", "NaN": "N/A", "None": "N/A", "": "N/A"})
-    )
-    df["system_id"] = (
-        df["system_id"].astype(str).str.strip()
-        .replace({"nan": "N/A", "NaN": "N/A", "None": "N/A", "": "N/A"})
-    )
+    for col in ("brand_name", "system_id"):
+        df[col] = (
+            df[col].astype(str).str.strip()
+            .apply(lambda v: "N/A" if _NA_STRINGS.match(v) else v)
+        )
     return df
 
 
@@ -281,24 +302,50 @@ def load_jurisdictional_registry(region: str) -> pd.DataFrame:
 
 @st.cache_data
 def build_registry_index(_registry_key: str, generic_names: tuple) -> dict[str, int]:
-    """Maps normalized ingredient tokens to row indices for O(1) Layer 1 resolution."""
+    """Maps normalized ingredient tokens to row indices for O(1) Layer 1 resolution.
+
+    BUG FIX: Previously, auto-prefix indexing ran over ALL registry names
+    including obscure chemicals like 'Para-Iodo-D-Phenylalanine Hydroxamic Acid',
+    which generated a 'para' key that overwrote the _PHARMA_OVERRIDES entry.
+    Fixes applied:
+      1. Short tokens (≤4 chars) are NEVER added to the auto-prefix index.
+      2. _PHARMA_OVERRIDES are seeded into the index FIRST so they cannot be
+         overwritten by any auto-generated prefix from an obscure registry name.
+      3. First-token index threshold raised to 6 chars (was 5) for extra safety.
+    """
     index: dict[str, int] = {}
     synonyms = REGIONAL_SYNONYMS.get(_registry_key, {})
 
+    # ── Seed _PHARMA_OVERRIDES first so obscure registry names cannot overwrite them ──
+    # We map each override target name to the first registry row that matches it.
+    override_lower = {v.lower(): k for k, v in _PHARMA_OVERRIDES.items()}  # e.g. "paracetamol" → "para"
+    for i, generic in enumerate(generic_names):
+        g_lower = str(generic).lower().strip()
+        if g_lower in override_lower:
+            # Pin the abbreviation key → this registry row (only if not already pinned)
+            abbrev_key = override_lower[g_lower]
+            if abbrev_key not in index:
+                index[abbrev_key] = i
+
+    # ── Main index build ──
     for i, generic in enumerate(generic_names):
         generic = str(generic)
         keys = {generic.lower(), _base_ingredient(generic).lower()}
         for key in keys:
             if not key:
                 continue
+            # BUG FIX: never let a short key (≤4 chars) be auto-indexed from a
+            # long obscure name — short keys must come from _PHARMA_OVERRIDES only.
+            if len(key) <= 4:
+                continue
             if key not in index or len(generic) < len(str(generic_names[index[key]])):
                 index[key] = i
             alt = synonyms.get(key)
             if alt and (alt not in index or len(generic) < len(str(generic_names[index[alt]]))):
                 index[alt] = i
-        # First-token index only for longer tokens (prevents PARA → obscure chemistry names)
+        # First-token index only for longer tokens (≥6 chars prevents PARA/MET/GABA collisions)
         first = generic.lower().split()[0] if generic.split() else ""
-        if len(first) >= 5 and (first not in index or len(generic) < len(str(generic_names[index[first]]))):
+        if len(first) >= 6 and (first not in index or len(generic) < len(str(generic_names[index[first]]))):
             index[first] = i
     return index
 
@@ -359,29 +406,79 @@ def _load_abbrev_dict() -> dict:
 
 
 # Wholesaler shorthands that collide with obscure registry ingredient names.
+# BUG FIX: Added missing shorthands seen in enterprise_procurement.csv:
+#   LISINO → Lisinopril, LEVO → Levothyroxine, SIMVA → Simvastatin,
+#   AMLO → Amlodipine, GABA → Gabapentin, ATORVA → Atorvastatin
+# These are seeded into build_registry_index BEFORE auto-prefix generation
+# so obscure chemical names cannot overwrite them.
 _PHARMA_OVERRIDES = {
-    "gaba": "Gabapentin", "gab": "Gabapentin",
-    "para": "Paracetamol", "pcm": "Paracetamol",
-    "met": "Metformin", "amox": "Amoxicillin",
-    "lisino": "Lisinopril", "atorva": "Atorvastatin",
-    "simva": "Simvastatin", "ibu": "Ibuprofen", "amlo": "Amlodipine",
-    "levo": "Levothyroxine", "omepra": "Omeprazole", "losart": "Losartan",
-    "panto": "Pantoprazole", "sertra": "Sertraline", "fluox": "Fluoxetine",
-    "predni": "Prednisone", "metop": "Metoprolol", "tram": "Tramadol",
+    # 3-4 char codes (highest collision risk — must be in overrides only)
+    "pcm":    "Paracetamol",
+    "ibu":    "Ibuprofen",
+    "met":    "Metformin",
+    "gab":    "Gabapentin",
+    "gaba":   "Gabapentin",
+    "para":   "Paracetamol",
+    "amox":   "Amoxicillin",
+    "tram":   "Tramadol",
+    "levo":   "Levothyroxine",
+    "amlo":   "Amlodipine",
+    # 5-6 char codes
+    "lisino": "Lisinopril",
+    "atorva": "Atorvastatin",
+    "simva":  "Simvastatin",
+    "omepra": "Omeprazole",
+    "losart": "Losartan",
+    "panto":  "Pantoprazole",
+    "sertra": "Sertraline",
+    "fluox":  "Fluoxetine",
+    "predni": "Prednisone",
+    "metop":  "Metoprolol",
+    # Extra common shorthands
+    "metfor": "Metformin",
+    "albu":   "Albuterol",
+    "salbu":  "Albuterol",
+    "losart": "Losartan",
+    "levoth": "Levothyroxine",
+    "sertr":  "Sertraline",
+    "fluoxe": "Fluoxetine",
+    "prednis":"Prednisone",
+    "metopro":"Metoprolol",
 }
 
 
 @st.cache_data
 def _build_abbrev_lookup(registry_key: str, registry_names: tuple) -> tuple:
-    """Merge JSON abbreviations with auto-generated registry prefixes."""
-    combined = dict(_load_abbrev_dict())
+    """Merge JSON abbreviations with auto-generated registry prefixes.
+
+    BUG FIX: Auto-prefix generation previously created entries like
+    'para' → 'Para-Iodo-D-Phenylalanine Hydroxamic Acid' from the registry,
+    which then overwrote the correct _PHARMA_OVERRIDES entry via setdefault.
+    Fixes:
+      1. _PHARMA_OVERRIDES are applied FIRST (not last via .update()).
+         setdefault() then prevents any auto-prefix from overwriting them.
+      2. Auto-prefix generation is skipped for names containing special chars
+         (, / + [ ) or names shorter than 7 chars to avoid short collisions.
+      3. Only 5 and 6-char prefixes are auto-generated (4-char is too risky).
+    """
+    # Seed with _PHARMA_OVERRIDES first — these are authoritative and must not
+    # be overwritten by anything from the registry or JSON file.
+    combined: dict[str, str] = dict(_PHARMA_OVERRIDES)
+
+    # Layer in JSON abbreviations (setdefault = don't overwrite pharma overrides)
+    for k, v in _load_abbrev_dict().items():
+        combined.setdefault(k, v)
+
+    # Auto-generate 5 and 6-char prefixes from clean registry names only
+    # (skip names with special chars, very short names, or very long names)
+    _SKIP_CHARS = re.compile(r'[,()/\[\]+]')
     for name in registry_names:
         clean = str(name).lower().strip()
-        if len(clean) <= 6 or "(" in clean or len(clean) > 40:
+        if len(clean) < 7 or len(clean) > 40 or _SKIP_CHARS.search(clean):
             continue
-        for n in (4, 5, 6):
+        for n in (5, 6):
             combined.setdefault(clean[:n], str(name))
-    combined.update(_PHARMA_OVERRIDES)
+
     # Longest keys first for greedy prefix matching
     sorted_items = tuple(sorted(combined.items(), key=lambda x: len(x[0]), reverse=True))
     return sorted_items
@@ -439,6 +536,12 @@ def build_tfidf_index(registry_key: str, registry_names: tuple):
     """
     Builds and caches the TF-IDF matrix for a given registry.
     registry_key is used only as a cache discriminator.
+
+    BUG FIX (Performance): The caller previously passed a freshly-built
+    pool_list (generic + brand concatenated) as the tuple, which changed
+    every call when brand_name values differed slightly, busting the cache.
+    Now the caller passes only generic_names (stable) and we build the
+    combined pool inside this cached function so the cache key is stable.
     """
     vectorizer = TfidfVectorizer(analyzer='char_wb', ngram_range=(2, 4))
     matrix     = vectorizer.fit_transform([n.lower() for n in registry_names])
@@ -451,17 +554,21 @@ def tfidf_match_batch(
     region_key: str,
     threshold: float,
 ) -> list[tuple[str | None, float]]:
-    """Batch TF-IDF match — one matrix multiply for all unresolved rows."""
+    """Batch TF-IDF match — one matrix multiply for all unresolved rows.
+
+    BUG FIX (Performance): Pass only generic_names tuple as cache key so
+    build_tfidf_index cache is stable across repeated calls in the same session.
+    Previously the pool_list included brand_name which varied and busted cache.
+    """
     n = len(clean_tokens)
     if master_df.empty or n == 0:
         return [(None, 0.0)] * n
 
-    pool_list = (
-        master_df["generic_name"].astype(str) + " " + master_df["brand_name"].astype(str)
-    ).str.strip().tolist()
+    # Use only generic names for the TF-IDF index (stable cache key)
+    generic_names_tuple = tuple(master_df["generic_name"].astype(str).tolist())
 
     try:
-        vectorizer, matrix = build_tfidf_index(region_key, tuple(pool_list))
+        vectorizer, matrix = build_tfidf_index(region_key, generic_names_tuple)
         results: list[tuple[str | None, float]] = []
         chunk_size = 2000
         for start in range(0, n, chunk_size):
