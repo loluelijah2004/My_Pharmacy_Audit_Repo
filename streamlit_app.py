@@ -54,6 +54,12 @@ REGIONAL_SYNONYMS = {
 CACHE_FILE = os.path.join(BASE_PATH, "layer1_cache_db.json")
 ABBREV_FILE = os.path.join(BASE_PATH, "abbreviations.json")
 
+# DATA_VERSION — bump this string whenever master_registry.csv or
+# abbreviations.json changes. This busts all @st.cache_data caches
+# that depend on registry/abbreviation data so Streamlit picks up
+# the new file contents immediately without a server restart.
+DATA_VERSION = "v7"
+
 # Canonical targets for _PHARMA_OVERRIDES — defined early so _cache_is_plausible
 # can reference them without a forward-reference NameError.
 # Keep in sync with _PHARMA_OVERRIDES below.
@@ -62,6 +68,7 @@ _PHARMA_OVERRIDE_TARGETS: frozenset[str] = frozenset({
     "amoxicillin", "tramadol", "levothyroxine", "amlodipine", "lisinopril",
     "atorvastatin", "simvastatin", "omeprazole", "losartan", "pantoprazole",
     "sertraline", "fluoxetine", "prednisone", "metoprolol", "albuterol",
+    "amoxicillin/clavulanate", "prednisone",
 })
 
 def load_cache_db() -> dict:
@@ -183,7 +190,8 @@ def _base_ingredient(name: str) -> str:
 
 
 @st.cache_data
-def _load_full_registry() -> pd.DataFrame:
+def _load_full_registry(_version: str = DATA_VERSION) -> pd.DataFrame:
+    """Load master_registry.csv. _version param busts cache when DATA_VERSION changes."""
     csv_path = os.path.join(BASE_PATH, "master_registry.csv")
     if not os.path.exists(csv_path):
         return pd.DataFrame()
@@ -194,7 +202,7 @@ def _load_full_registry() -> pd.DataFrame:
 
 
 @st.cache_data
-def _load_pharmacy_core(region_key: str, data_dir: str) -> pd.DataFrame:
+def _load_pharmacy_core(region_key: str, data_dir: str, _version: str = DATA_VERSION) -> pd.DataFrame:
     """Compact bundled list of common pharmacy drugs (brand + NDC) for cloud deploys."""
     path = os.path.join(BASE_PATH, "data", f"pharmacy_core_{data_dir}.csv")
     if not os.path.exists(path):
@@ -247,7 +255,7 @@ def _merge_registry_sources(
 
 
 @st.cache_data
-def _load_regional_supplement(region_key: str, data_dir: str) -> pd.DataFrame:
+def _load_regional_supplement(region_key: str, data_dir: str, _version: str = DATA_VERSION) -> pd.DataFrame:
     """Load FDA / NHS / DPD regional file to fill gaps in master_registry."""
     path = os.path.join(BASE_PATH, "data", data_dir, f"master_{data_dir}.csv")
     if not os.path.exists(path):
@@ -301,7 +309,7 @@ def load_jurisdictional_registry(region: str) -> pd.DataFrame:
 
 
 @st.cache_data
-def build_registry_index(_registry_key: str, generic_names: tuple) -> dict[str, int]:
+def build_registry_index(_registry_key: str, generic_names: tuple, _version: str = DATA_VERSION) -> dict[str, int]:
     """Maps normalized ingredient tokens to row indices for O(1) Layer 1 resolution.
 
     BUG FIX: Previously, auto-prefix indexing ran over ALL registry names
@@ -358,30 +366,55 @@ def resolve_in_registry(
     *,
     from_abbrev: bool = False,
 ) -> tuple[str | None, int | None]:
-    """Map an abbreviation or cleaned token to the best registry row."""
+    """Map an abbreviation or cleaned token to the best registry row.
+
+    CRITICAL FIX: Short tokens that are known pharma abbreviations (≤6 chars,
+    in _PHARMA_OVERRIDES keys) must NOT be resolved via the registry index
+    directly — they must come through abbrev_lookup_fallback first.
+    This prevents 'PARA' hitting the index and matching 'Para-Iodo-D-...'
+    even after the index is rebuilt correctly, as a defence-in-depth guard.
+
+    When from_abbrev=True, the candidate is already the resolved full name
+    (e.g. 'Paracetamol'), so index lookup is appropriate.
+    """
     if not candidate or master_df.empty:
+        return None, None
+
+    c_lower = candidate.lower().strip()
+
+    # GUARD: if the raw token is a known pharma abbreviation key and we're NOT
+    # coming from the abbreviation resolver, block direct index lookup.
+    # This prevents 'PARA' → 'Para-Iodo...' via Exact Name Match.
+    if not from_abbrev and c_lower in _PHARMA_OVERRIDES:
         return None, None
 
     synonyms = REGIONAL_SYNONYMS.get(region_key, {})
     probes = [
-        candidate.lower().strip(),
+        c_lower,
         _base_ingredient(candidate).lower(),
-        synonyms.get(candidate.lower().strip(), ""),
+        synonyms.get(c_lower, ""),
     ]
-    first_word = candidate.lower().strip().split()[0] if candidate.split() else ""
-    # Short invoice tokens (PARA, MET) must go through abbreviation map, not token index
-    if first_word and (from_abbrev or len(first_word) >= 5):
+    first_word = c_lower.split()[0] if c_lower.split() else ""
+    # Short invoice tokens (PARA, MET) must go through abbreviation map, not token index.
+    # Only add first_word probe for longer tokens (≥6 chars) or when coming from abbrev resolver.
+    if first_word and (from_abbrev or len(first_word) >= 6):
         probes.append(first_word)
 
     for probe in probes:
         if probe and probe in registry_index:
             idx = registry_index[probe]
-            return str(master_df.iloc[idx]["generic_name"]), idx
+            resolved = str(master_df.iloc[idx]["generic_name"])
+            # Extra safety: if the resolved name is an obscure chemical (very long or
+            # contains special chars) and the probe is short, reject it.
+            if len(probe) <= 5 and not from_abbrev:
+                if len(resolved) > 40 or any(c in resolved for c in "()-,/[]"):
+                    continue
+            return resolved, idx
 
     # Prefix: registry name extends the probe (e.g. "lisinopril" → "lisinopril hydrochloride")
     best_idx, best_len = None, 0
     for probe in probes:
-        if not probe or len(probe) < 4:
+        if not probe or len(probe) < 6:  # Raised from 4 to 6 — short probes cause wrong prefix hits
             continue
         for key, idx in registry_index.items():
             if key.startswith(probe) and len(key) > best_len:
@@ -397,7 +430,8 @@ def resolve_in_registry(
 # =====================================================================
 
 @st.cache_data
-def _load_abbrev_dict() -> dict:
+def _load_abbrev_dict(_version: str = DATA_VERSION) -> dict:
+    """Load abbreviations.json. _version param busts cache when DATA_VERSION changes."""
     try:
         with open(ABBREV_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -448,7 +482,7 @@ _PHARMA_OVERRIDES = {
 
 
 @st.cache_data
-def _build_abbrev_lookup(registry_key: str, registry_names: tuple) -> tuple:
+def _build_abbrev_lookup(registry_key: str, registry_names: tuple, _version: str = DATA_VERSION) -> tuple:
     """Merge JSON abbreviations with auto-generated registry prefixes.
 
     BUG FIX: Auto-prefix generation previously created entries like
@@ -485,8 +519,22 @@ def _build_abbrev_lookup(registry_key: str, registry_names: tuple) -> tuple:
 
 
 def abbrev_lookup(clean_token: str, abbrev_items: tuple) -> str | None:
-    """Returns canonical name if token matches a known abbreviation, else None."""
+    """Returns canonical name if token matches a known abbreviation, else None.
+
+    CRITICAL FIX: Short tokens (≤4 chars) use EXACT match only.
+    The abbreviations.json has 29,000+ entries including many 3-4 char codes
+    that are prefixes of longer drug names. Using prefix-regex on short tokens
+    causes 'met' to match 'metfo' → 'Metaraminol for' before reaching the
+    correct 'met' → 'Metformin' entry. Exact match prevents this.
+    """
     t = clean_token.lower().strip()
+    # For short tokens, require exact match (no prefix expansion)
+    if len(t) <= 4:
+        for abbrev, full_name in abbrev_items:
+            if abbrev.lower().strip() == t:
+                return full_name
+        return None
+    # For longer tokens, use prefix regex as before
     for abbrev, full_name in abbrev_items:
         if re.match(r'^' + re.escape(abbrev.lower().strip()) + r'(\s|/|$)', t, re.IGNORECASE):
             return full_name
@@ -497,9 +545,22 @@ def abbrev_lookup_fallback(clean_token: str, abbrev_items: tuple, master_df: pd.
     """
     Try abbreviation lookup; if resolved name not in registry, find closest TF-IDF match.
     Returns (resolved_name, fallback_used).
+
+    CRITICAL FIX: If the abbreviation resolves to a known _PHARMA_OVERRIDE target
+    (e.g. 'met'→'Metformin', 'para'→'Paracetamol'), return it DIRECTLY without
+    registry validation. Previously, if the registry cache was stale and didn't
+    contain 'Metformin' yet, the function fell through to TF-IDF which then
+    picked the closest match ('Formic Acid') — completely wrong.
     """
     abbrev_result = abbrev_lookup(clean_token, abbrev_items)
-    if not abbrev_result or master_df.empty:
+    if not abbrev_result:
+        return None, None
+
+    # FAST PATH: known pharma override targets are always trusted — no registry check needed
+    if abbrev_result.lower() in _PHARMA_OVERRIDE_TARGETS:
+        return abbrev_result, None
+
+    if master_df.empty:
         return None, None
 
     # Check if the resolved abbreviation exists in registry
@@ -508,6 +569,7 @@ def abbrev_lookup_fallback(clean_token: str, abbrev_items: tuple, master_df: pd.
         return abbrev_result, None  # Found directly
 
     # Name not in registry — try fuzzy match on the abbreviation-resolved name
+    # Only do this for non-pharma-override results to avoid wrong fallbacks
     try:
         vectorizer = TfidfVectorizer(analyzer='char_wb', ngram_range=(2, 4))
         matrix = vectorizer.fit_transform(registry_names)
@@ -515,7 +577,7 @@ def abbrev_lookup_fallback(clean_token: str, abbrev_items: tuple, master_df: pd.
         scores = cosine_similarity(query, matrix)[0]
         best_idx = int(np.argmax(scores))
         best_score = float(scores[best_idx])
-        if best_score >= 0.40:  # Lower threshold for fallback
+        if best_score >= 0.55:  # Raised threshold: only accept high-confidence fallbacks
             return master_df.iloc[best_idx]["generic_name"], f"abbrev→{abbrev_result}"
     except Exception:
         pass
