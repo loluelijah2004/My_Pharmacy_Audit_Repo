@@ -425,7 +425,96 @@ def resolve_in_registry(
 
 
 # =====================================================================
-# 5. LAYER 1: DETERMINISTIC ABBREVIATION LOOKUP
+# 5. CONTEXT-AWARE DOSAGE MATCHING (NEW LAYER 1 ENHANCEMENT)
+#    Extracts dosage/form context and uses it to refine matches.
+# =====================================================================
+_DOSAGE_PATTERN = re.compile(
+    r'(\d+(?:\.\d+)?)\s*(?:mg|mcg|g|ml|iu|units?)\b',
+    re.IGNORECASE
+)
+_FORM_PATTERN = re.compile(
+    r'\b(tab|tabs|cap|caps|capsule|capsules|tablet|tablets|'
+    r'er|sr|xr|xl|dr|eff|effervescent|inj|injection|'
+    r'soln?|solution|susp|suspension|cream|gel|ointment|patch|spray)\b',
+    re.IGNORECASE
+)
+
+def extract_dosage_context(raw_text: str) -> dict:
+    """Extract dosage strength and form from invoice text.
+    
+    Returns dict with 'strength' (e.g. '500mg') and 'form' (e.g. 'tablets').
+    """
+    context = {"strength": None, "form": None, "raw": raw_text}
+    
+    # Extract dosage strength
+    strength_match = _DOSAGE_PATTERN.search(raw_text)
+    if strength_match:
+        context["strength"] = strength_match.group(0).lower()
+    
+    # Extract dosage form
+    form_match = _FORM_PATTERN.search(raw_text)
+    if form_match:
+        context["form"] = form_match.group(1).lower()
+    
+    return context
+
+
+def score_registry_match_with_context(
+    resolved_name: str,
+    context: dict,
+    master_df: pd.DataFrame
+) -> tuple[str, float]:
+    """
+    Given a resolved generic name and dosage context, find the best matching
+    registry entry that preserves dosage/form information.
+    
+    Example: 'Paracetamol' + context={'strength': '500mg', 'form': 'tablets'}
+    → 'Paracetamol 500mg Tablets' (if available in registry)
+    
+    Returns (best_registry_name, confidence_boost).
+    """
+    if master_df.empty or not resolved_name:
+        return resolved_name, 0.0
+    
+    # Find all registry entries matching the resolved generic name
+    matching_rows = master_df[
+        master_df["generic_name"].astype(str).str.lower().str.contains(
+            resolved_name.lower(), regex=False, na=False
+        )
+    ]
+    
+    if matching_rows.empty:
+        return resolved_name, 0.0
+    
+    if len(matching_rows) == 1:
+        return str(matching_rows.iloc[0]["generic_name"]), 0.0
+    
+    # Score each match based on dosage/form alignment
+    best_match = resolved_name
+    best_score = 0.0
+    
+    for _, row in matching_rows.iterrows():
+        registry_name = str(row["generic_name"]).lower()
+        score = 0.0
+        
+        # Bonus for matching strength
+        if context.get("strength") and context["strength"] in registry_name:
+            score += 0.5
+        
+        # Bonus for matching form
+        if context.get("form") and context["form"] in registry_name:
+            score += 0.3
+        
+        # Prefer shorter, more specific matches
+        if score > best_score or (score == best_score and len(registry_name) < len(best_match.lower())):
+            best_score = score
+            best_match = str(row["generic_name"])
+    
+    return best_match, best_score
+
+
+# =====================================================================
+# 5b. DETERMINISTIC ABBREVIATION LOOKUP
 #    Loads custom abbreviations from an external abbreviations.json file.
 # =====================================================================
 
@@ -541,10 +630,15 @@ def abbrev_lookup(clean_token: str, abbrev_items: tuple) -> str | None:
     return None
 
 
-def abbrev_lookup_fallback(clean_token: str, abbrev_items: tuple, master_df: pd.DataFrame) -> tuple[str | None, str | None]:
+def abbrev_lookup_fallback(clean_token: str, abbrev_items: tuple, master_df: pd.DataFrame,
+                          context: dict | None = None) -> tuple[str | None, str | None]:
     """
     Try abbreviation lookup; if resolved name not in registry, find closest TF-IDF match.
     Returns (resolved_name, fallback_used).
+    
+    ENHANCED: Now accepts dosage context to refine matches.
+    Example: 'para' → 'Paracetamol' + context={'strength': '500mg'}
+             → 'Paracetamol 500mg Tablets' (if available)
 
     CRITICAL FIX: If the abbreviation resolves to a known _PHARMA_OVERRIDE target
     (e.g. 'met'→'Metformin', 'para'→'Paracetamol'), return it DIRECTLY without
@@ -558,6 +652,10 @@ def abbrev_lookup_fallback(clean_token: str, abbrev_items: tuple, master_df: pd.
 
     # FAST PATH: known pharma override targets are always trusted — no registry check needed
     if abbrev_result.lower() in _PHARMA_OVERRIDE_TARGETS:
+        # Apply context-aware refinement if available
+        if context:
+            refined_name, _ = score_registry_match_with_context(abbrev_result, context, master_df)
+            return refined_name, None
         return abbrev_result, None
 
     if master_df.empty:
@@ -566,6 +664,10 @@ def abbrev_lookup_fallback(clean_token: str, abbrev_items: tuple, master_df: pd.
     # Check if the resolved abbreviation exists in registry
     registry_names = master_df["generic_name"].astype(str).str.lower().str.strip().tolist()
     if abbrev_result.lower() in registry_names:
+        # Apply context-aware refinement
+        if context:
+            refined_name, _ = score_registry_match_with_context(abbrev_result, context, master_df)
+            return refined_name, None
         return abbrev_result, None  # Found directly
 
     # Name not in registry — try fuzzy match on the abbreviation-resolved name
@@ -578,7 +680,12 @@ def abbrev_lookup_fallback(clean_token: str, abbrev_items: tuple, master_df: pd.
         best_idx = int(np.argmax(scores))
         best_score = float(scores[best_idx])
         if best_score >= 0.55:  # Raised threshold: only accept high-confidence fallbacks
-            return master_df.iloc[best_idx]["generic_name"], f"abbrev→{abbrev_result}"
+            matched_name = master_df.iloc[best_idx]["generic_name"]
+            # Apply context refinement to fuzzy match result
+            if context:
+                refined_name, _ = score_registry_match_with_context(matched_name, context, master_df)
+                return refined_name, f"abbrev→{abbrev_result}"
+            return matched_name, f"abbrev→{abbrev_result}"
     except Exception:
         pass
 
@@ -594,16 +701,20 @@ def abbrev_lookup_fallback(clean_token: str, abbrev_items: tuple, master_df: pd.
 #    at ~0.75. The threshold slider now applies correctly.
 # =====================================================================
 @st.cache_resource
-def build_tfidf_index(registry_key: str, registry_names: tuple):
+def build_tfidf_index(registry_key: str, registry_names: tuple, _version: str = DATA_VERSION):
     """
     Builds and caches the TF-IDF matrix for a given registry.
     registry_key is used only as a cache discriminator.
+    _version param busts cache when DATA_VERSION changes.
 
     BUG FIX (Performance): The caller previously passed a freshly-built
     pool_list (generic + brand concatenated) as the tuple, which changed
     every call when brand_name values differed slightly, busting the cache.
     Now the caller passes only generic_names (stable) and we build the
     combined pool inside this cached function so the cache key is stable.
+    
+    OPTIMIZATION: Added _version parameter to ensure cache is busted when
+    registry data changes, preventing stale TF-IDF matrices.
     """
     vectorizer = TfidfVectorizer(analyzer='char_wb', ngram_range=(2, 4))
     matrix     = vectorizer.fit_transform([n.lower() for n in registry_names])
@@ -615,8 +726,11 @@ def tfidf_match_batch(
     master_df: pd.DataFrame,
     region_key: str,
     threshold: float,
+    contexts: list[dict] | None = None,
 ) -> list[tuple[str | None, float]]:
     """Batch TF-IDF match — one matrix multiply for all unresolved rows.
+    
+    ENHANCED: Now accepts optional dosage contexts to refine matches.
 
     BUG FIX (Performance): Pass only generic_names tuple as cache key so
     build_tfidf_index cache is stable across repeated calls in the same session.
@@ -630,17 +744,25 @@ def tfidf_match_batch(
     generic_names_tuple = tuple(master_df["generic_name"].astype(str).tolist())
 
     try:
-        vectorizer, matrix = build_tfidf_index(region_key, generic_names_tuple)
+        vectorizer, matrix = build_tfidf_index(region_key, generic_names_tuple, DATA_VERSION)
         results: list[tuple[str | None, float]] = []
         chunk_size = 2000
         for start in range(0, n, chunk_size):
             queries = [t.lower() for t in clean_tokens[start:start + chunk_size]]
             score_matrix = cosine_similarity(vectorizer.transform(queries), matrix)
-            for row_scores in score_matrix:
+            for idx, row_scores in enumerate(score_matrix):
                 best_idx   = int(np.argmax(row_scores))
                 best_score = float(row_scores[best_idx])
                 if best_score >= threshold:
-                    results.append((str(master_df.iloc[best_idx]["generic_name"]), best_score))
+                    matched_name = str(master_df.iloc[best_idx]["generic_name"])
+                    # Apply context refinement if available
+                    if contexts and (start + idx) < len(contexts) and contexts[start + idx]:
+                        refined_name, _ = score_registry_match_with_context(
+                            matched_name, contexts[start + idx], master_df
+                        )
+                        results.append((refined_name, best_score))
+                    else:
+                        results.append((matched_name, best_score))
                 else:
                     results.append((None, best_score))
         return results
@@ -749,6 +871,7 @@ def run_reconciliation(client_df: pd.DataFrame, master_df: pd.DataFrame,
     system_ids     = ["N/A"] * n_rows
     l2_tried       = [False] * n_rows
     l2_best_score  = [0.0] * n_rows
+    contexts       = [None] * n_rows  # NEW: dosage/form context for each row
     cache_dirty    = False
     registry_set   = set(registry_names)
 
@@ -770,10 +893,14 @@ def run_reconciliation(client_df: pd.DataFrame, master_df: pd.DataFrame,
         invoice_prices[i] = float(getattr(row, "Client_Current_Price", 0.0))
         clean_tokens[i]   = strip_noise(raw_inputs[i])
         hash_keys[i]      = hashlib.md5(f"{wholesaler_ids[i]}||{raw_inputs[i]}".lower().encode()).hexdigest()
+        
+        # NEW: Extract dosage context from raw input for context-aware matching
+        contexts[i]       = extract_dosage_context(raw_inputs[i])
 
         if verbose:
             diagnostics[i]["raw"] = raw_inputs[i]
             diagnostics[i]["clean"] = clean_tokens[i]
+            diagnostics[i]["context"] = contexts[i]
             diagnostics[i]["layer1_attempts"] = []
 
         cached = cache_db.get(hash_keys[i]) or st.session_state["ai_cache"].get(hash_keys[i])
@@ -795,8 +922,8 @@ def run_reconciliation(client_df: pd.DataFrame, master_df: pd.DataFrame,
         if verbose:
             diagnostics[i]["layer1_attempts"].append("Cache: miss")
 
-        # Layer 1: Abbreviation Lookup with fallback
-        abbrev_name, fallback_note = abbrev_lookup_fallback(clean_tokens[i], abbrev_items, master_df)
+        # Layer 1: Abbreviation Lookup with fallback (now with context-aware refinement)
+        abbrev_name, fallback_note = abbrev_lookup_fallback(clean_tokens[i], abbrev_items, master_df, contexts[i])
         if abbrev_name:
             name, reg_idx = resolve_in_registry(
                 abbrev_name, master_df, registry_index, region_key, from_abbrev=True
@@ -836,9 +963,10 @@ def run_reconciliation(client_df: pd.DataFrame, master_df: pd.DataFrame,
     l2_pending = [i for i in range(n_rows) if not resolved[i]]
     if l2_pending:
         batch_tokens = [clean_tokens[i] for i in l2_pending]
+        batch_contexts = [contexts[i] for i in l2_pending]  # NEW: pass contexts for refinement
         # Lower threshold for Layer 2 since TF-IDF scores are typically 0.3-0.7 for pharmacy names
         l2_threshold_actual = max(0.30, l2_threshold * 0.8)  # Don't let user threshold block all matches
-        batch_hits   = tfidf_match_batch(batch_tokens, master_df, region_key, l2_threshold_actual)
+        batch_hits   = tfidf_match_batch(batch_tokens, master_df, region_key, l2_threshold_actual, batch_contexts)
         for i, (tfidf_name, tfidf_score) in zip(l2_pending, batch_hits):
             l2_tried[i]      = True
             l2_best_score[i] = tfidf_score
