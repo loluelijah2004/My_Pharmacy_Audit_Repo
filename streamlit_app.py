@@ -204,26 +204,21 @@ st.markdown("""
         }
         
         /* Landing page background image styling */
+        .stApp {
+            background: linear-gradient(135deg, rgba(26, 32, 44, 0.75) 0%, rgba(15, 118, 110, 0.75) 100%);
+        }
+        
         [data-testid="stAppViewContainer"] {
-            background-image: url('file:///Pharmacy.jpg');
             background-size: cover;
             background-position: center;
             background-attachment: fixed;
         }
+        
+        /* Main content area background */
+        [data-testid="stMainBlockContainer"] {
+            background: transparent;
+        }
     </style>
-    
-    <script>
-        // Apply Pharmacy.jpg background to landing page
-        document.addEventListener('DOMContentLoaded', function() {
-            const appContainer = document.querySelector('[data-testid="stAppViewContainer"]');
-            if (appContainer) {
-                appContainer.style.backgroundImage = "url('Pharmacy.jpg')";
-                appContainer.style.backgroundSize = "cover";
-                appContainer.style.backgroundPosition = "center";
-                appContainer.style.backgroundAttachment = "fixed";
-            }
-        });
-    </script>
 """, unsafe_allow_html=True)
 
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -1174,6 +1169,22 @@ def style_rows(row):
 # =====================================================================
 # STATE 1: LANDING PAGE
 if st.session_state.page == "landing":
+    # Apply background styling to landing page
+    st.markdown("""
+        <style>
+            /* Landing page background with pharmacy pattern */
+            .stApp {
+                background: linear-gradient(135deg, rgba(26, 32, 44, 0.8) 0%, rgba(15, 118, 110, 0.8) 100%);
+                background-attachment: fixed;
+            }
+            
+            .landing-container {
+                background: transparent;
+                padding: 0;
+            }
+        </style>
+    """, unsafe_allow_html=True)
+    
     nav_col1, nav_col2 = st.columns([8, 2])
     with nav_col1:
         st.markdown('<div class="apex-logo">🧬 APEX LOGIC</div>', unsafe_allow_html=True)
