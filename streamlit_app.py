@@ -68,9 +68,99 @@ def check_whop_authorization(membership_id: str) -> bool:
 # =====================================================================
 st.markdown("""
     <style>
-        .brand-header { font-size: 42px; font-weight: 800; letter-spacing: 2px; color: #FFFFFF; margin-bottom: 0px; }
-        .brand-subtitle { font-size: 14px; font-weight: 400; letter-spacing: 4px; color: #00FFCC; margin-top: 0px; margin-bottom: 25px; }
-        .stTabs [data-baseweb="tab"] { font-size: 16px; font-weight: 600; padding: 12px 24px; }
+        @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700;800&family=Inter:wght@400;500;600;700&display=swap');
+        
+        * { font-family: 'Inter', sans-serif; }
+        h1, h2, h3, h4, h5, h6 { font-family: 'Poppins', sans-serif; }
+        
+        .brand-header {
+            font-size: 56px;
+            font-weight: 800;
+            letter-spacing: 2px;
+            color: #FFFFFF;
+            margin-bottom: 0px;
+            font-family: 'Poppins', sans-serif;
+        }
+        .brand-subtitle {
+            font-size: 24px;
+            font-weight: 400;
+            letter-spacing: 4px;
+            color: #00FFCC;
+            margin-top: 0px;
+            margin-bottom: 25px;
+            font-family: 'Poppins', sans-serif;
+        }
+        .stTabs [data-baseweb="tab"] {
+            font-size: 16px;
+            font-weight: 600;
+            padding: 12px 24px;
+            font-family: 'Poppins', sans-serif;
+        }
+        
+        .hero-title {
+            font-size: 4.5rem;
+            font-weight: 800;
+            line-height: 1.2;
+            color: #FFFFFF;
+            font-family: 'Poppins', sans-serif;
+            margin-bottom: 1.5rem;
+        }
+        
+        .sub-hero {
+            font-size: 1.5rem;
+            font-weight: 400;
+            line-height: 1.6;
+            color: #E2E8F0;
+            font-family: 'Inter', sans-serif;
+            margin-bottom: 2rem;
+        }
+        
+        .accent-text {
+            color: #00FFCC;
+            font-weight: 700;
+        }
+        
+        .price-card {
+            background: linear-gradient(135deg, #1A202C 0%, #2D3748 100%);
+            border: 2px solid #4A5568;
+            border-radius: 12px;
+            padding: 24px;
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+        
+        .price-card:hover {
+            border-color: #00FFCC;
+            box-shadow: 0 0 20px rgba(0, 255, 204, 0.3);
+            transform: translateY(-5px);
+        }
+        
+        .price-card-premium {
+            background: linear-gradient(135deg, #0F766E 0%, #14B8A6 100%);
+            border: 2px solid #00FFCC;
+            border-radius: 12px;
+            padding: 24px;
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+        
+        .price-card-premium:hover {
+            box-shadow: 0 0 30px rgba(0, 255, 204, 0.5);
+            transform: translateY(-8px);
+        }
+        
+        .flag-badge {
+            display: inline-block;
+            font-size: 2rem;
+            margin-right: 0.5rem;
+            vertical-align: middle;
+        }
+        
+        .pharmacy-bg {
+            background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><defs><pattern id="pharmacy" x="0" y="0" width="20" height="20" patternUnits="userSpaceOnUse"><circle cx="10" cy="10" r="2" fill="%2300FFCC" opacity="0.1"/><path d="M10 5 L15 15 L5 15 Z" fill="%2300FFCC" opacity="0.05"/></pattern></defs><rect width="100" height="100" fill="%231A202C"/><rect width="100" height="100" fill="url(%23pharmacy)"/></svg>');
+            background-size: 200px 200px;
+            background-attachment: fixed;
+        }
     </style>
 """, unsafe_allow_html=True)
 
@@ -1051,13 +1141,13 @@ if st.session_state.page == "landing":
     st.markdown("### 💳 Corporate Deployment Packages")
     tier1_col, tier2_col, tier3_col = st.columns(3)
     with tier1_col:
-        st.markdown('<div class="price-card"><h4>📦 Tier 1: Standalone Toolkit</h4><h2>£99 <span style="font-size:1rem;color:#A0AEC0">One-Time Payment</span></h2><hr style="border-color:#2D3748"><p style="margin-bottom:0.5rem;">• Full master abbreviation mapping package (abbreviations.json)</p><p style="margin-bottom:0.5rem;">• Local pipeline implementation and audit templates</p><p style="margin-bottom:0.5rem;">• Optimized for internal development and localized audit setups</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="price-card"><h4><span class="flag-badge">🇺🇸 🇨🇦 🇬🇧</span> Tier 1: Standalone Toolkit</h4><h2>$149 <span style="font-size:1rem;color:#A0AEC0">One-Time Payment</span></h2><hr style="border-color:#2D3748"><p style="margin-bottom:0.5rem;">• Full master abbreviation mapping package (abbreviations.json)</p><p style="margin-bottom:0.5rem;">• Local pipeline implementation and audit templates</p><p style="margin-bottom:0.5rem;">• Optimized for internal development and localized audit setups</p></div>', unsafe_allow_html=True)
         st.link_button("Get Standalone Kit", "https://whop.com/your-tier-1-checkout-link", use_container_width=True)
     with tier2_col:
-        st.markdown('<div class="price-card-premium"><h4>🧬 Tier 2: Cloud Instance Software Access</h4><h2>£499 <span style="font-size:1rem;color:#A0AEC0">/ Month</span></h2><hr style="border-color:#00FFBB"><p style="margin-bottom:0.5rem;">• Infinite, automated 24/7 web application invoice uploads</p><p style="margin-bottom:0.5rem;">• Multi-regional database compliance (UK, Canada, US formats)</p><p style="margin-bottom:0.5rem;">• Absolute cross-border matrix validation engine</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="price-card-premium"><h4><span class="flag-badge">🇺🇸 🇨🇦 ��🇧</span> Tier 2: Cloud Instance Software Access</h4><h2>$699 <span style="font-size:1rem;color:#A0AEC0">/ Month</span></h2><hr style="border-color:#00FFBB"><p style="margin-bottom:0.5rem;">• Infinite, automated 24/7 web application invoice uploads</p><p style="margin-bottom:0.5rem;">• Multi-regional database compliance (UK, Canada, US formats)</p><p style="margin-bottom:0.5rem;">• Absolute cross-border matrix validation engine</p></div>', unsafe_allow_html=True)
         st.link_button("Launch Cloud Engine", "https://whop.com/your-tier-2-checkout-link", type="primary", use_container_width=True)
     with tier3_col:
-        st.markdown('<div class="price-card"><h4>🏢 Tier 3: Bespoke Enterprise Integration</h4><h2>£2,500 <span style="font-size:1rem;color:#A0AEC0">Setup</span> + £250<span style="font-size:1rem;color:#A0AEC0">/Mo</span></h2><hr style="border-color:#2D3748"><p style="margin-bottom:0.5rem;">• Custom logic mapped directly to your specific PMS layouts</p><p style="margin-bottom:0.5rem;">• Secure automated webhooks and pipeline scripts</p><p style="margin-bottom:0.5rem;">• Priority server allocation & dedicated architecture kickoff strategy call</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="price-card"><h4><span class="flag-badge">🇺🇸 🇨🇦 🇬🇧</span> Tier 3: Bespoke Enterprise Integration</h4><h2>$3,500 <span style="font-size:1rem;color:#A0AEC0">Setup</span> + $299<span style="font-size:1rem;color:#A0AEC0">/Mo</span></h2><hr style="border-color:#2D3748"><p style="margin-bottom:0.5rem;">• Custom logic mapped directly to your specific PMS layouts</p><p style="margin-bottom:0.5rem;">• Secure automated webhooks and pipeline scripts</p><p style="margin-bottom:0.5rem;">• Priority server allocation & dedicated architecture kickoff strategy call</p></div>', unsafe_allow_html=True)
         st.link_button("Book Integration Call", "https://calendly.com/your-link", use_container_width=True)
 
 # STATE 2: LOGIN PAGE
@@ -1112,7 +1202,7 @@ if st.session_state.authenticated or st.session_state.page == "app":
     st.markdown('<div class="brand-header">🧬 APEX LOGIC</div>', unsafe_allow_html=True)
     st.markdown('<div class="brand-subtitle">GLOBAL PHARMACY AUDIT ENGINE</div>', unsafe_allow_html=True)
 
-    tab_overview, tab_workspace = st.tabs(["🏠 Platform Overview", "⚡ Automated Audit Suite"])
+    tab_overview, tab_upload, tab_lookup, tab_batch = st.tabs(["🏠 Platform Overview", "📤 Invoice Upload", "🔍 Manual Lookup", "📦 Batch Processing"])
 
     with tab_overview:
         col_left, col_right = st.columns([2, 1])
@@ -1133,10 +1223,10 @@ if st.session_state.authenticated or st.session_state.page == "app":
             else:
                 st.warning("Layer 3 Gemini AI: No API key — add GEMINI_API_KEY to Streamlit secrets")
 
-    with tab_workspace:
+    with tab_upload:
         master_registry = load_jurisdictional_registry(jurisdiction)
         j_profile       = JURISDICTION_PROFILES[jurisdiction]
-        st.markdown("#### 📑 Invoice Upload")
+        st.markdown("#### 📑 Single Invoice Upload")
         uploaded_file = st.file_uploader("Upload invoice (.csv or .xlsx)", type=["csv", "xlsx"], label_visibility="collapsed")
 
         if uploaded_file is not None:
@@ -1230,4 +1320,117 @@ if st.session_state.authenticated or st.session_state.page == "app":
         else:
             st.write("---")
             st.info("Upload an invoice to begin.")
+
+    with tab_lookup:
+        st.markdown("#### 🔍 Manual Drug Name Lookup")
+        st.write("Search for a specific drug name in the registry and view its details across all regions.")
+        
+        master_registry = load_jurisdictional_registry(jurisdiction)
+        j_profile = JURISDICTION_PROFILES[jurisdiction]
+        
+        search_term = st.text_input("Enter drug name or abbreviation:", placeholder="e.g., Paracetamol, PCM, Metformin")
+        
+        if search_term:
+            search_lower = search_term.lower().strip()
+            matches = master_registry[
+                master_registry["generic_name"].astype(str).str.lower().str.contains(search_lower, regex=False, na=False)
+            ]
+            
+            if not matches.empty:
+                st.success(f"Found {len(matches)} match(es)")
+                display_cols = ["generic_name", "brand_name", "baseline_price", "system_id"]
+                display_matches = matches[[c for c in display_cols if c in matches.columns]].copy()
+                display_matches = display_matches.rename(columns={
+                    "generic_name": j_profile["generic_label"],
+                    "brand_name": j_profile["brand_label"],
+                    "baseline_price": "Baseline Price",
+                    "system_id": j_profile["id_label"]
+                })
+                st.dataframe(display_matches, use_container_width=True)
+            else:
+                st.warning("No matches found. Try a different search term.")
+
+    with tab_batch:
+        st.markdown("#### 📦 Batch Processing with Invoice Upload")
+        st.write("Upload multiple invoices for batch processing and analysis.")
+        
+        master_registry = load_jurisdictional_registry(jurisdiction)
+        j_profile = JURISDICTION_PROFILES[jurisdiction]
+        
+        batch_files = st.file_uploader(
+            "Upload multiple invoices (.csv or .xlsx)",
+            type=["csv", "xlsx"],
+            accept_multiple_files=True,
+            label_visibility="collapsed"
+        )
+        
+        if batch_files:
+            st.info(f"📦 {len(batch_files)} file(s) selected for batch processing")
+            
+            if st.button("🚀 Process Batch", type="primary", use_container_width=True):
+                all_results = []
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                for idx, uploaded_file in enumerate(batch_files):
+                    status_text.text(f"Processing {idx + 1}/{len(batch_files)}: {uploaded_file.name}")
+                    
+                    try:
+                        client_data = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
+                        
+                        raw_columns = client_data.columns.tolist()
+                        normalized_map = {c: c.strip().lower().replace("_","").replace(" ","").replace("-","").replace("/","") for c in raw_columns}
+                        drug_synonyms = ["drugname","drug","product","productname","item","itemdescription","medication","medicine","description","standardname","molecule","activeingredient","clinicalname","brand","clientdrugname"]
+                        price_synonyms = ["unitprice","price","cost","currentprice","rate","amount","procurementcost","contractprice","billingamount","acquisitioncost","invoiceprice","clientcurrentprice"]
+                        
+                        detected_drug = next((o for o, c in normalized_map.items() if c in drug_synonyms), None)
+                        detected_price = next((o for o, c in normalized_map.items() if c in price_synonyms), None)
+                        
+                        if detected_drug and detected_price:
+                            working_df = client_data.copy()
+                            working_df["Client_Drug_Name"] = client_data[detected_drug].astype(str).str.strip()
+                            working_df["Client_Current_Price"] = (client_data[detected_price].astype(str).str.replace(r"[^\d.]", "", regex=True).replace("", "0").astype(float))
+                            
+                            sku_col = next((c for c in raw_columns if normalized_map[c] in ("sku", "vendorsku", "distributorsku", "productcode", "itemcode")), None)
+                            if sku_col:
+                                working_df["SKU"] = client_data[sku_col].astype(str)
+                            
+                            results = run_reconciliation(working_df, master_registry, jurisdiction, l2_threshold, use_ai, verbose=False)
+                            results["Source_File"] = uploaded_file.name
+                            all_results.append(results)
+                    except Exception as e:
+                        st.warning(f"⚠️ Error processing {uploaded_file.name}: {str(e)}")
+                    
+                    progress_bar.progress((idx + 1) / len(batch_files))
+                
+                status_text.empty()
+                progress_bar.empty()
+                
+                if all_results:
+                    combined_results = pd.concat(all_results, ignore_index=True)
+                    st.success(f"✅ Batch processing complete! {len(combined_results)} total rows processed.")
+                    
+                    m1, m2, m3, m4 = st.columns(4)
+                    overcharges = combined_results[combined_results["Audit Verdict"] == "🚨 TARIFF OVERCHARGE"]
+                    unresolved = combined_results[combined_results["Generic Name"].str.contains("UNRESOLVED")]
+                    m1.metric("Total Rows", len(combined_results))
+                    m2.metric("Overcharge Exposure", f"${overcharges['Price Variance'].sum():,.2f}")
+                    m3.metric("Unresolved", len(unresolved))
+                    m4.metric("Auto-Resolved", f"{len(combined_results) - len(unresolved)}/{len(combined_results)}")
+                    
+                    st.markdown("##### Batch Results Summary")
+                    display_df = combined_results.drop(columns=["_raw_score", "_hash"], errors="ignore").copy()
+                    st.dataframe(display_df, use_container_width=True)
+                    
+                    st.markdown("---")
+                    st.markdown("#### 📤 Export Batch Results")
+                    batch_export = display_df.to_csv(index=False).encode()
+                    st.download_button(
+                        "📦 Download Batch Results",
+                        data=batch_export,
+                        file_name=f"apex_batch_{jurisdiction.lower()}.csv",
+                        mime="text/csv"
+                    )
+        else:
+            st.info("Upload invoices to begin batch processing.")
 
