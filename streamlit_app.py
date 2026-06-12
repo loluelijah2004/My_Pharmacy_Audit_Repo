@@ -804,21 +804,12 @@ def call_gemini_api(raw_input: str, clean_token: str,
         return {"status": "error", "reason": str(e)}
 
 # =====================================================================
-# 9. MAIN ROUTING LOGIC - LANDING PAGE, LOGIN, AND APP ENGINE
+# 9. RECONCILIATION ENGINE
 # =====================================================================
 def run_reconciliation(client_df: pd.DataFrame, master_df: pd.DataFrame,
                        jurisdiction: str, l2_threshold: float,
                        use_ai: bool, verbose: bool = False) -> pd.DataFrame:
-    """
-    Full pipeline per invoice row:
-      Phase 1  — Strip noise from raw text
-      Phase 2  — Check persistent hash cache (Layer 1 instant hit)
-      Phase 3  — Abbreviation dictionary lookup (Layer 1 deterministic)
-      Phase 4  — Exact name match on cleaned token (Layer 1)
-      Phase 5  — TF-IDF cosine similarity (Layer 2, batched)
-      Phase 6  — Gemini AI fallback (Layer 3)
-      Phase 7  — Audit: compare invoice price vs registry baseline
-    """
+    """Full pipeline per invoice row"""
     n_rows = len(client_df)
     if n_rows == 0 or master_df.empty:
         return pd.DataFrame()
@@ -832,7 +823,6 @@ def run_reconciliation(client_df: pd.DataFrame, master_df: pd.DataFrame,
     if "ai_cache" not in st.session_state:
         st.session_state["ai_cache"] = {}
 
-    # Pre-allocate per-row state (avoids repeated DataFrame scans)
     skus           = [""] * n_rows
     raw_inputs     = [""] * n_rows
     clean_tokens   = [""] * n_rows
@@ -849,10 +839,8 @@ def run_reconciliation(client_df: pd.DataFrame, master_df: pd.DataFrame,
     cache_dirty    = False
     registry_set   = set(registry_names)
 
-    # Diagnostic tracking
     diagnostics    = [{"step": "init"} for _ in range(n_rows)] if verbose else None
 
-    # ── Pass 1: ingest + Layer 1 (cache, abbrev, exact) ──────────────
     for i, row in enumerate(client_df.itertuples(index=True)):
         idx = row.Index
         skus[i] = (
@@ -876,10 +864,7 @@ def run_reconciliation(client_df: pd.DataFrame, master_df: pd.DataFrame,
         cached = cache_db.get(hash_keys[i]) or st.session_state["ai_cache"].get(hash_keys[i])
         if cached:
             cached_name = cached.get("generic_name", "")
-            if (
-                cached_name in registry_set
-                and _cache_is_plausible(clean_tokens[i], cached_name)
-            ):
+            if cached_name in registry_set and _cache_is_plausible(clean_tokens[i], cached_name):
                 resolved[i]     = cached_name
                 brand_names[i]  = cached.get("brand_name", "N/A")
                 system_ids[i]   = cached.get("system_id", "N/A")
@@ -892,12 +877,9 @@ def run_reconciliation(client_df: pd.DataFrame, master_df: pd.DataFrame,
         if verbose:
             diagnostics[i]["layer1_attempts"].append("Cache: miss")
 
-        # Layer 1: Abbreviation Lookup with fallback
         abbrev_name, fallback_note = abbrev_lookup_fallback(clean_tokens[i], abbrev_items, master_df)
         if abbrev_name:
-            name, reg_idx = resolve_in_registry(
-                abbrev_name, master_df, registry_index, region_key, from_abbrev=True
-            )
+            name, reg_idx = resolve_in_registry(abbrev_name, master_df, registry_index, region_key, from_abbrev=True)
             if name:
                 resolved[i]     = name
                 match_layers[i] = "Layer 1: Abbreviation Lookup"
@@ -907,15 +889,8 @@ def run_reconciliation(client_df: pd.DataFrame, master_df: pd.DataFrame,
                 if verbose:
                     diagnostics[i]["layer1_attempts"].append(f"Abbrev: '{abbrev_name}' -> {name}")
                 continue
-            elif verbose:
-                diagnostics[i]["layer1_attempts"].append(f"Abbrev: resolved to '{abbrev_name}' but NOT in registry")
 
-        if verbose:
-            diagnostics[i]["layer1_attempts"].append("Abbrev: miss")
-
-        name, reg_idx = resolve_in_registry(
-            clean_tokens[i], master_df, registry_index, region_key, from_abbrev=False
-        )
+        name, reg_idx = resolve_in_registry(clean_tokens[i], master_df, registry_index, region_key, from_abbrev=False)
         if name:
             resolved[i]     = name
             match_layers[i] = "Layer 1: Exact Name Match"
@@ -926,22 +901,14 @@ def run_reconciliation(client_df: pd.DataFrame, master_df: pd.DataFrame,
                 diagnostics[i]["layer1_attempts"].append(f"Exact: HIT -> {name}")
             continue
 
-        if verbose:
-            diagnostics[i]["layer1_attempts"].append("Exact: miss")
-
-    # ── Pass 2: Layer 2 TF-IDF (batched) — ALWAYS attempt for unresolved ──
     l2_pending = [i for i in range(n_rows) if not resolved[i]]
     if l2_pending:
         batch_tokens = [clean_tokens[i] for i in l2_pending]
-        # Lower threshold for Layer 2 since TF-IDF scores are typically 0.3-0.7 for pharmacy names
-        l2_threshold_actual = max(0.30, l2_threshold * 0.8)  # Don't let user threshold block all matches
+        l2_threshold_actual = max(0.30, l2_threshold * 0.8)
         batch_hits   = tfidf_match_batch(batch_tokens, master_df, region_key, l2_threshold_actual)
         for i, (tfidf_name, tfidf_score) in zip(l2_pending, batch_hits):
             l2_tried[i]      = True
             l2_best_score[i] = tfidf_score
-            if verbose:
-                diagnostics[i]["layer2_score"] = f"{tfidf_score:.1%}"
-                diagnostics[i]["layer2_match"] = tfidf_name or "—"
             if tfidf_name and tfidf_score >= l2_threshold_actual:
                 reg_row = master_df[master_df["generic_name"] == tfidf_name].iloc[0]
                 resolved[i]     = tfidf_name
@@ -949,18 +916,13 @@ def run_reconciliation(client_df: pd.DataFrame, master_df: pd.DataFrame,
                 confidences[i]  = tfidf_score
                 brand_names[i]  = str(reg_row["brand_name"])
                 system_ids[i]   = str(reg_row["system_id"])
-                if verbose:
-                    diagnostics[i]["layer2_status"] = "ACCEPTED"
                 cache_db[hash_keys[i]] = {
                     "generic_name": tfidf_name,
                     "brand_name":   brand_names[i],
                     "system_id":    system_ids[i],
                 }
                 cache_dirty = True
-            elif verbose:
-                diagnostics[i]["layer2_status"] = f"below_threshold ({tfidf_score:.1%})" if tfidf_score > 0 else "no_match"
 
-    # ── Pass 3: Layer 3 AI (only unresolved) ─────────────────────────
     if use_ai:
         for i in range(n_rows):
             if resolved[i]:
@@ -986,13 +948,11 @@ def run_reconciliation(client_df: pd.DataFrame, master_df: pd.DataFrame,
     if cache_dirty:
         save_cache_db(cache_db)
 
-    # ── Pass 4: flag unresolved + price audit ───────────────────────
     rows = []
     for i in range(n_rows):
         resolved_name = resolved[i]
         if not resolved_name:
             resolved_name = "UNRESOLVED — HUMAN OVERRIDE REQUIRED"
-            # Show what Layer 2 found (if anything)
             if l2_tried[i] and l2_best_score[i] > 0:
                 match_layers[i] = f"Layer 2: Below Threshold ({l2_best_score[i]:.1%})"
                 confidences[i] = l2_best_score[i]
@@ -1032,12 +992,10 @@ def run_reconciliation(client_df: pd.DataFrame, master_df: pd.DataFrame,
             "_hash":                hash_keys[i],
         })
 
-    # Store diagnostics in session state if verbose
     if verbose and diagnostics:
         st.session_state["diagnostics"] = diagnostics
 
     return pd.DataFrame(rows)
-
 
 # =====================================================================
 # 10. DISPLAY HELPER
@@ -1052,74 +1010,91 @@ def style_rows(row):
     return [''] * len(row)
 
 # =====================================================================
-# 11. UI
+# 11. MAIN UI - LANDING PAGE, LOGIN, AND APP ENGINE
 # =====================================================================
-st.markdown('<div class="brand-header">🧬 APEX LOGIC</div>', unsafe_allow_html=True)
-st.markdown('<div class="brand-subtitle">GLOBAL PHARMACY AUDIT ENGINE</div>', unsafe_allow_html=True)
+# STATE 1: LANDING PAGE
+if st.session_state.page == "landing":
+    nav_col1, nav_col2 = st.columns([8, 2])
+    with nav_col1:
+        st.markdown("### 🧬 **APEX LOGIC**")
+    with nav_col2:
+        if st.button("🔒 Client Login Portal", use_container_width=True, type="secondary"):
+            st.session_state.page = "login"
+            st.rerun()
 
-tab_overview, tab_workspace = st.tabs(["🏠 Platform Overview", "⚡ Automated Audit Suite"])
+    st.markdown("---")
+    hero_col1, hero_col2 = st.columns([6, 4])
+    with hero_col1:
+        st.markdown('<p class="hero-title">Stop Manually Wrestling with <span class="accent-text">Pharmacy Vendor Invoices</span>.</p>', unsafe_allow_html=True)
+        st.markdown('<p class="sub-hero">The automated data harmonization engine built for modern pharmacies. Instantly scrub, standardize, and format messy supplier spreadsheets across the UK, Canada, and the US.</p>', unsafe_allow_html=True)
+    with hero_col2:
+        st.info("📦 **Data Pipeline Ingestion Stream**\n\n→ `PCM 500mg (UK)` *(Messy Vendor Invoiced Shorthand)*\n\n⚡ *Apex Harmonization Matrix Processing...*\n\n→ **Paracetamol 500mg Tablet (Active Canonical ID: 104)**")
 
-with tab_overview:
-    col_left, col_right = st.columns([2, 1])
-    with col_left:
-        st.markdown("### Reclaim Your Pharmacy's Lost Margin")
-        st.write(
-            "Apex Logic processes distributor invoices through a three-layer resolution engine — "
-            "deterministic abbreviation lookup, TF-IDF cosine similarity, and AI fallback — "
-            "then cross-references every resolved drug against live national baseline registries "
-            "to surface hidden price gouging before you clear accounts payable."
-        )
-        st.markdown("#### 🌍 Regions Supported")
-        st.info("**United Kingdom:** NHS dm+d\n\n**United States:** FDA NDC\n\n**Canada:** Health Canada DPD")
-        st.markdown("#### ⚙️ Three-Layer Pipeline")
-        st.markdown("""
-| Layer | Method | Example |
-|---|---|---|
-| **Layer 1a** | Hash cache (persistent) | Same supplier + drug → instant hit |
-| **Layer 1b** | Abbreviation dictionary (150+ shortcuts) | `MET → Metformin`, `PCM → Paracetamol` |
-| **Layer 1c** | Exact name match after noise strip | `LISINOPRIL 5MG TABS` → `Lisinopril` |
-| **Layer 2** | TF-IDF char n-gram cosine similarity | `SERTRALINE` → `Sertraline` |
-| **Layer 3** | Gemini AI (bounded JSON schema) | Anything ambiguous |
-""")
-    with col_right:
-        st.markdown("⚙️ **System Status**")
-        st.success("Layer 1 Cache + Lookup: Online")
-        st.success("Layer 2 TF-IDF Engine: Active")
-        gemini_key = st.secrets.get("GEMINI_API_KEY", "")
-        if gemini_key:
-            st.success("Layer 3 Gemini AI: Configured ✅")
-        else:
-            st.warning("Layer 3 Gemini AI: No API key — add GEMINI_API_KEY to Streamlit secrets")
+    st.markdown("##")
+    st.markdown("---")
+    st.markdown("### 🛠️ Enterprise Data Infrastructure")
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        st.markdown("#### 🔍 Who We Are")
+        st.write("An advanced data-cleaning and harmonization layer engineered specifically to eliminate structural friction in complex pharmaceutical supply chains.")
+    with p2:
+        st.markdown("#### ⚡ What It Does")
+        st.write("We ingest completely unstandardized, abbreviated retail pharmacy invoices. The platform instantly purges human errors, shorthand typos, and mismatched naming conventions.")
+    with p3:
+        st.markdown("#### 🚀 Why We Are Better")
+        st.write("Zero manual labor. Our framework scales effortlessly across Health Canada, UK NHS, and US baseline registries with an evolutionary dynamic caching layer.")
 
-with tab_workspace:
+    st.markdown("##")
+    st.markdown("---")
+    st.warning("🚀 **Global Pilot Group Initiative (Strictly Limited)**: To seed our foundational pilot group across our launch regions, We are offering an exclusive **50% lifetime discount** to the first **5 pharmacies** to register in the UK, Canada, and the US. Use code **`APEXEARLY50`** at checkout. Once the 5th slot in your region is filled, the system automatically reverts to regular pricing.")
+
+    st.markdown("### 💳 Corporate Deployment Packages")
+    tier1_col, tier2_col, tier3_col = st.columns(3)
+    with tier1_col:
+        st.markdown('<div class="price-card"><h4>📦 Tier 1: Standalone Toolkit</h4><h2>£99 <span style="font-size:1rem;color:#A0AEC0">One-Time Payment</span></h2><hr style="border-color:#2D3748"><p style="margin-bottom:0.5rem;">• Full master abbreviation mapping package (abbreviations.json)</p><p style="margin-bottom:0.5rem;">• Local pipeline implementation and audit templates</p><p style="margin-bottom:0.5rem;">• Optimized for internal development and localized audit setups</p></div>', unsafe_allow_html=True)
+        st.link_button("Get Standalone Kit", "https://whop.com/your-tier-1-checkout-link", use_container_width=True)
+    with tier2_col:
+        st.markdown('<div class="price-card-premium"><h4>🧬 Tier 2: Cloud Instance Software Access</h4><h2>£499 <span style="font-size:1rem;color:#A0AEC0">/ Month</span></h2><hr style="border-color:#00FFBB"><p style="margin-bottom:0.5rem;">• Infinite, automated 24/7 web application invoice uploads</p><p style="margin-bottom:0.5rem;">• Multi-regional database compliance (UK, Canada, US formats)</p><p style="margin-bottom:0.5rem;">• Absolute cross-border matrix validation engine</p></div>', unsafe_allow_html=True)
+        st.link_button("Launch Cloud Engine", "https://whop.com/your-tier-2-checkout-link", type="primary", use_container_width=True)
+    with tier3_col:
+        st.markdown('<div class="price-card"><h4>🏢 Tier 3: Bespoke Enterprise Integration</h4><h2>£2,500 <span style="font-size:1rem;color:#A0AEC0">Setup</span> + £250<span style="font-size:1rem;color:#A0AEC0">/Mo</span></h2><hr style="border-color:#2D3748"><p style="margin-bottom:0.5rem;">• Custom logic mapped directly to your specific PMS layouts</p><p style="margin-bottom:0.5rem;">• Secure automated webhooks and pipeline scripts</p><p style="margin-bottom:0.5rem;">• Priority server allocation & dedicated architecture kickoff strategy call</p></div>', unsafe_allow_html=True)
+        st.link_button("Book Integration Call", "https://calendly.com/your-link", use_container_width=True)
+
+# STATE 2: LOGIN PAGE
+elif st.session_state.page == "login" and not st.session_state.authenticated:
+    st.markdown("### 🔒 Enterprise System Authentication")
+    st.write("Please authenticate your active subscription to unlock the multi-regional cleaning infrastructure.")
+    input_key = st.text_input("Enter your Whop Membership Key:", type="password")
+    l_col1, l_col2 = st.columns(2)
+    with l_col1:
+        if st.button("Unlock Core Dashboard", type="primary", use_container_width=True):
+            if check_whop_authorization(input_key):
+                st.session_state.authenticated = True
+                st.session_state.page = "app"
+                st.success("Access Authorized. Initializing engine matrix...")
+                st.rerun()
+            else:
+                st.error("Access Denied. Invalid, expired, or inactive membership key.")
+    with l_col2:
+        if st.button("⬅️ Back to Storefront Overview", use_container_width=True):
+            st.session_state.page = "landing"
+            st.rerun()
+
+# STATE 3: PROTECTED APP ENGINE
+if st.session_state.authenticated or st.session_state.page == "app":
     with st.sidebar:
         st.markdown("### 📊 Parameters")
         jurisdiction = st.selectbox("Region", ["UK", "US", "Canada"])
-        l2_threshold = st.slider(
-            "Layer 2 Confidence Threshold", 0.30, 1.00, 0.50,
-            help="TF-IDF cosine scores for pharmacy names realistically peak at 0.5–0.8. "
-                 "Setting this above 0.8 means almost nothing reaches Layer 2 acceptance."
-        )
-        use_ai = st.toggle(
-            "Enable Layer 3 AI Fallback",
-            value=False,
-            help="Requires GEMINI_API_KEY in Streamlit secrets."
-        )
+        l2_threshold = st.slider("Layer 2 Confidence Threshold", 0.30, 1.00, 0.50, help="TF-IDF cosine scores for pharmacy names realistically peak at 0.5–0.8.")
+        use_ai = st.toggle("Enable Layer 3 AI Fallback", value=False, help="Requires GEMINI_API_KEY in Streamlit secrets.")
         if use_ai and not st.secrets.get("GEMINI_API_KEY", ""):
             st.sidebar.error("⚠️ GEMINI_API_KEY missing from secrets. Layer 3 will not fire.")
-
-        enable_diagnostics = st.toggle(
-            "Show Diagnostic Output",
-            value=False,
-            help="Display layer-by-layer resolution details for first 20 rows."
-        )
-
+        enable_diagnostics = st.toggle("Show Diagnostic Output", value=False, help="Display layer-by-layer resolution details for first 20 rows.")
         if st.button("🗑️ Clear Resolution Cache", help="Remove stale/wrong cached drug mappings from prior runs"):
             clear_cache_db()
             st.session_state.pop("run_id", None)
             st.success("Cache cleared — re-upload invoice to re-run pipeline.")
             st.rerun()
-
         st.write("---")
         st.caption(f"Region: {jurisdiction} | L2 threshold: {l2_threshold:.0%}")
         st.write("---")
@@ -1127,210 +1102,132 @@ with tab_workspace:
             st.markdown("<small>🔒 **ARCHITECTURAL BOUNDARY**</small>", unsafe_allow_html=True)
             st.caption("No EMR/EHR or eRx connectivity. Financial reconciliation only.")
         st.markdown("### 🏛️ Enterprise Support")
-        st.link_button("💻 Service Desk", url="https://support.apexlogic.ai/portal", width='stretch')
-        st.link_button("📞 Priority Callback", url="mailto:enterprise-ops@apexlogic.ai?subject=URGENT", width='stretch')
+        st.link_button("💻 Service Desk", url="https://support.apexlogic.ai/portal", use_container_width=True)
+        st.link_button("📞 Priority Callback", url="mailto:enterprise-ops@apexlogic.ai?subject=URGENT", use_container_width=True)
+        if st.button("🚪 Secure Log Out", use_container_width=True):
+            st.session_state.authenticated = False
+            st.session_state.page = "landing"
+            st.rerun()
 
-    master_registry = load_jurisdictional_registry(jurisdiction)
-    j_profile       = JURISDICTION_PROFILES[jurisdiction]
+    st.markdown('<div class="brand-header">🧬 APEX LOGIC</div>', unsafe_allow_html=True)
+    st.markdown('<div class="brand-subtitle">GLOBAL PHARMACY AUDIT ENGINE</div>', unsafe_allow_html=True)
 
-    st.markdown("#### 📑 Invoice Upload")
-    uploaded_file = st.file_uploader(
-        "Upload invoice (.csv or .xlsx)",
-        type=["csv", "xlsx"],
-        label_visibility="collapsed"
-    )
+    tab_overview, tab_workspace = st.tabs(["🏠 Platform Overview", "⚡ Automated Audit Suite"])
 
-    if uploaded_file is not None:
-        try:
-            client_data = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
-        except Exception as e:
-            st.error(f"🚨 Could not read file: {e}")
-            st.stop()
+    with tab_overview:
+        col_left, col_right = st.columns([2, 1])
+        with col_left:
+            st.markdown("### Reclaim Your Pharmacy's Lost Margin")
+            st.write("Apex Logic processes distributor invoices through a three-layer resolution engine — deterministic abbreviation lookup, TF-IDF cosine similarity, and AI fallback — then cross-references every resolved drug against live national baseline registries to surface hidden price gouging before you clear accounts payable.")
+            st.markdown("#### 🌍 Regions Supported")
+            st.info("**United Kingdom:** NHS dm+d\n\n**United States:** FDA NDC\n\n**Canada:** Health Canada DPD")
+            st.markdown("#### ⚙️ Three-Layer Pipeline")
+            st.markdown("| Layer | Method | Example |\n|---|---|---|\n| **Layer 1a** | Hash cache (persistent) | Same supplier + drug → instant hit |\n| **Layer 1b** | Abbreviation dictionary (150+ shortcuts) | `MET → Metformin`, `PCM → Paracetamol` |\n| **Layer 1c** | Exact name match after noise strip | `LISINOPRIL 5MG TABS` → `Lisinopril` |\n| **Layer 2** | TF-IDF char n-gram cosine similarity | `SERTRALINE` → `Sertraline` |\n| **Layer 3** | Gemini AI (bounded JSON schema) | Anything ambiguous |")
+        with col_right:
+            st.markdown("⚙️ **System Status**")
+            st.success("Layer 1 Cache + Lookup: Online")
+            st.success("Layer 2 TF-IDF Engine: Active")
+            gemini_key = st.secrets.get("GEMINI_API_KEY", "")
+            if gemini_key:
+                st.success("Layer 3 Gemini AI: Configured ✅")
+            else:
+                st.warning("Layer 3 Gemini AI: No API key — add GEMINI_API_KEY to Streamlit secrets")
 
-        st.markdown("##### Raw Invoice Preview")
-        st.dataframe(client_data.head(5), width='stretch')
+    with tab_workspace:
+        master_registry = load_jurisdictional_registry(jurisdiction)
+        j_profile       = JURISDICTION_PROFILES[jurisdiction]
+        st.markdown("#### 📑 Invoice Upload")
+        uploaded_file = st.file_uploader("Upload invoice (.csv or .xlsx)", type=["csv", "xlsx"], label_visibility="collapsed")
 
-        # Column auto-detection
-        raw_columns    = client_data.columns.tolist()
-        normalized_map = {c: c.strip().lower().replace("_","").replace(" ","").replace("-","").replace("/","") for c in raw_columns}
+        if uploaded_file is not None:
+            try:
+                client_data = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
+            except Exception as e:
+                st.error(f"🚨 Could not read file: {e}")
+                st.stop()
 
-        drug_synonyms  = ["drugname","drug","product","productname","item","itemdescription",
-                          "medication","medicine","description","standardname","molecule",
-                          "activeingredient","clinicalname","brand","clientdrugname"]
-        price_synonyms = ["unitprice","price","cost","currentprice","rate","amount",
-                          "procurementcost","contractprice","billingamount","acquisitioncost",
-                          "invoiceprice","clientcurrentprice"]
+            st.markdown("##### Raw Invoice Preview")
+            st.dataframe(client_data.head(5), use_container_width=True)
 
-        detected_drug  = next((o for o, c in normalized_map.items() if c in drug_synonyms),  None)
-        detected_price = next((o for o, c in normalized_map.items() if c in price_synonyms), None)
+            raw_columns    = client_data.columns.tolist()
+            normalized_map = {c: c.strip().lower().replace("_","").replace(" ","").replace("-","").replace("/","") for c in raw_columns}
+            drug_synonyms  = ["drugname","drug","product","productname","item","itemdescription","medication","medicine","description","standardname","molecule","activeingredient","clinicalname","brand","clientdrugname"]
+            price_synonyms = ["unitprice","price","cost","currentprice","rate","amount","procurementcost","contractprice","billingamount","acquisitioncost","invoiceprice","clientcurrentprice"]
+            detected_drug  = next((o for o, c in normalized_map.items() if c in drug_synonyms),  None)
+            detected_price = next((o for o, c in normalized_map.items() if c in price_synonyms), None)
 
-        st.markdown("#### ⚙️ Column Mapping")
-        c1, c2 = st.columns(2)
-        with c1:
-            drug_col = detected_drug or st.selectbox("Drug Name Column", raw_columns, key="drug_col")
-            if detected_drug:
-                st.success(f"🎯 Auto-detected: **{detected_drug}**")
-                drug_col = detected_drug
-        with c2:
-            price_col = detected_price or st.selectbox("Unit Price Column", raw_columns, key="price_col")
-            if detected_price:
-                st.success(f"🎯 Auto-detected: **{detected_price}**")
-                price_col = detected_price
+            st.markdown("#### ⚙️ Column Mapping")
+            c1, c2 = st.columns(2)
+            with c1:
+                drug_col = detected_drug or st.selectbox("Drug Name Column", raw_columns, key="drug_col")
+                if detected_drug:
+                    st.success(f"🎯 Auto-detected: **{detected_drug}**")
+                    drug_col = detected_drug
+            with c2:
+                price_col = detected_price or st.selectbox("Unit Price Column", raw_columns, key="price_col")
+                if detected_price:
+                    st.success(f"🎯 Auto-detected: **{detected_price}**")
+                    price_col = detected_price
 
-        working_df = client_data.copy()
-        working_df["Client_Drug_Name"]    = client_data[drug_col].astype(str).str.strip()
-        working_df["Client_Current_Price"] = (
-            client_data[price_col].astype(str)
-            .str.replace(r"[^\d.]", "", regex=True)
-            .replace("", "0").astype(float)
-        )
-        sku_col = next(
-            (c for c in raw_columns
-             if normalized_map[c] in ("sku", "vendorsku", "distributorsku", "productcode", "itemcode")),
-            None
-        )
-        if sku_col:
-            working_df["SKU"] = client_data[sku_col].astype(str)
-        st.toast("✅ Invoice ingested — running pipeline...", icon="⚡")
+            working_df = client_data.copy()
+            working_df["Client_Drug_Name"]    = client_data[drug_col].astype(str).str.strip()
+            working_df["Client_Current_Price"] = (client_data[price_col].astype(str).str.replace(r"[^\d.]", "", regex=True).replace("", "0").astype(float))
+            sku_col = next((c for c in raw_columns if normalized_map[c] in ("sku", "vendorsku", "distributorsku", "productcode", "itemcode")), None)
+            if sku_col:
+                working_df["SKU"] = client_data[sku_col].astype(str)
+            st.toast("✅ Invoice ingested — running pipeline...", icon="⚡")
 
-        # Run pipeline
-        ENGINE_VERSION = "v6"
-        ai_flag        = "ai_on" if use_ai else "ai_off"
-        run_id         = f"{ENGINE_VERSION}_{uploaded_file.name}_{jurisdiction}_{l2_threshold}_{ai_flag}"
+            ENGINE_VERSION = "v6"
+            ai_flag        = "ai_on" if use_ai else "ai_off"
+            run_id         = f"{ENGINE_VERSION}_{uploaded_file.name}_{jurisdiction}_{l2_threshold}_{ai_flag}"
 
-        if st.session_state.get("run_id") != run_id:
-            with st.spinner("Running three-layer pipeline..."):
-                st.session_state["audit_data"] = run_reconciliation(
-                    working_df, master_registry, jurisdiction, l2_threshold, use_ai, verbose=enable_diagnostics
-                )
-                st.session_state["run_id"] = run_id
+            if st.session_state.get("run_id") != run_id:
+                with st.spinner("Running three-layer pipeline..."):
+                    st.session_state["audit_data"] = run_reconciliation(working_df, master_registry, jurisdiction, l2_threshold, use_ai, verbose=enable_diagnostics)
+                    st.session_state["run_id"] = run_id
 
-        results_df = st.session_state["audit_data"]
+            results_df = st.session_state["audit_data"]
+            overcharges  = results_df[results_df["Audit Verdict"] == "🚨 TARIFF OVERCHARGE"]
+            unresolved   = results_df[results_df["Generic Name"].str.contains("UNRESOLVED")]
+            l1_hits      = results_df[results_df["Match Layer"].str.startswith("Layer 1")]
+            l2_hits      = results_df[results_df["Match Layer"].str.startswith("Layer 2: TF-IDF")]
+            l2_miss      = results_df[results_df["Match Layer"].str.startswith("Layer 2: Below")]
+            l3_ai_hits   = results_df[results_df["Match Layer"] == "Layer 3: AI Resolution"]
+            exposure     = overcharges["Price Variance"].sum()
 
-        # Metrics
-        overcharges  = results_df[results_df["Audit Verdict"] == "🚨 TARIFF OVERCHARGE"]
-        unresolved   = results_df[results_df["Generic Name"].str.contains("UNRESOLVED")]
-        l1_hits      = results_df[results_df["Match Layer"].str.startswith("Layer 1")]
-        l2_hits      = results_df[results_df["Match Layer"].str.startswith("Layer 2: TF-IDF")]
-        l2_miss      = results_df[results_df["Match Layer"].str.startswith("Layer 2: Below")]
-        l3_ai_hits   = results_df[results_df["Match Layer"] == "Layer 3: AI Resolution"]
-        exposure     = overcharges["Price Variance"].sum()
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Rows Audited", len(results_df))
+            m2.metric("Overcharge Exposure", f"${exposure:,.2f}", delta=f"{len(overcharges)} lines", delta_color="inverse")
+            m3.metric("Unresolved", len(unresolved))
+            m4.metric("Auto-Resolved", f"{len(results_df) - len(unresolved)}/{len(results_df)}")
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Rows Audited", len(results_df))
-        m2.metric("Overcharge Exposure", f"${exposure:,.2f}", delta=f"{len(overcharges)} lines", delta_color="inverse")
-        m3.metric("Unresolved", len(unresolved))
-        m4.metric("Auto-Resolved", f"{len(results_df) - len(unresolved)}/{len(results_df)}")
+            r1, r2, r3, r4 = st.columns(4)
+            r1.metric("⚡ Layer 1 (Cache + Lookup)", len(l1_hits))
+            r2.metric("🔬 Layer 2 (TF-IDF Hit)", len(l2_hits))
+            r3.metric("📉 Layer 2 (Below Threshold)", len(l2_miss))
+            r4.metric("🤖 Layer 3 (AI)", len(l3_ai_hits))
 
-        r1, r2, r3, r4 = st.columns(4)
-        r1.metric("⚡ Layer 1 (Cache + Lookup)", len(l1_hits))
-        r2.metric("🔬 Layer 2 (TF-IDF Hit)", len(l2_hits))
-        r3.metric("📉 Layer 2 (Below Threshold)", len(l2_miss))
-        r4.metric("🤖 Layer 3 (AI)", len(l3_ai_hits))
+            display_df = results_df.drop(columns=["_raw_score", "_hash"], errors="ignore").copy()
+            display_df = display_df.rename(columns={"Generic Name": j_profile["generic_label"], "Brand Name": j_profile["brand_label"], "System ID": j_profile["id_label"]})
+            for col in ["Invoice Price", "Registry Baseline", "Price Variance"]:
+                if col in display_df.columns:
+                    display_df[col] = display_df[col].map("${:,.4f}".format)
+            if "Variance %" in display_df.columns:
+                display_df["Variance %"] = display_df["Variance %"].map("{:,.1f}%".format)
 
-        # Results table — rename columns per jurisdiction
-        display_df = results_df.drop(columns=["_raw_score", "_hash"], errors="ignore").copy()
-        display_df = display_df.rename(columns={
-            "Generic Name": j_profile["generic_label"],
-            "Brand Name":   j_profile["brand_label"],
-            "System ID":    j_profile["id_label"],
-        })
-        for col in ["Invoice Price", "Registry Baseline", "Price Variance"]:
-            if col in display_df.columns:
-                display_df[col] = display_df[col].map("${:,.4f}".format)
-        if "Variance %" in display_df.columns:
-            display_df["Variance %"] = display_df["Variance %"].map("{:,.1f}%".format)
+            st.markdown("##### Audit Results")
+            st.dataframe(display_df.style.apply(style_rows, axis=1), use_container_width=True)
 
-        st.markdown("##### Audit Results")
-        st.dataframe(display_df.style.apply(style_rows, axis=1), width='stretch')
-
-        # Diagnostic output (if enabled)
-        if "enable_diagnostics" in st.session_state and st.session_state["enable_diagnostics"] and "diagnostics" in st.session_state:
             st.markdown("---")
-            st.markdown("##### Diagnostic Details (First 20 Rows)")
-            diag_data = []
-            for i, diag in enumerate(st.session_state.get("diagnostics", [])[:20]):
-                if not diag or i >= len(results_df):
-                    continue
-                row = results_df.iloc[i]
-                diag_data.append({
-                    "SKU": row["SKU"],
-                    "Original": row["Original Invoice Tag"][:40],
-                    "Clean Token": row["Cleaned Token"],
-                    "Layer 1": " → ".join(diag.get("layer1_attempts", ["—"])[:2]),
-                    "Layer 2": f"{diag.get('layer2_match', '—')} ({diag.get('layer2_score', '—')})",
-                    "Result": row["Generic Name"][:30],
-                })
-            if diag_data:
-                diag_df = pd.DataFrame(diag_data)
-                st.dataframe(diag_df, width='stretch')
+            st.markdown("#### 📤 Export")
+            ex1, ex2 = st.columns(2)
+            with ex1:
+                clean_cols = ["SKU", j_profile["generic_label"], j_profile["brand_label"], "Invoice Price", "Registry Baseline", "Price Variance", "Audit Verdict"]
+                clean_export = display_df[[c for c in clean_cols if c in display_df.columns]]
+                st.download_button("📦 Clean PMS File", data=clean_export.to_csv(index=False).encode(), file_name=f"apex_pms_{jurisdiction.lower()}.csv", mime="text/csv")
+            with ex2:
+                st.download_button("🔎 Full Audit Workbook", data=display_df.to_csv(index=False).encode(), file_name=f"apex_audit_{jurisdiction.lower()}.csv", mime="text/csv")
+        else:
+            st.write("---")
+            st.info("Upload an invoice to begin.")
 
-            # Show summary statistics
-            st.markdown("##### Resolution Pipeline Summary")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                if "diagnostics" in st.session_state:
-                    cache_hits = sum(1 for d in st.session_state["diagnostics"] if d and "Cache: HIT" in " ".join(d.get("layer1_attempts", [])))
-                    st.metric("Cache Hits (Layer 1a)", cache_hits)
-            with col2:
-                if "diagnostics" in st.session_state:
-                    abbrev_hits = sum(1 for d in st.session_state["diagnostics"] if d and any("Abbrev:" in a and "HIT" in a for a in d.get("layer1_attempts", [])))
-                    st.metric("Abbrev Hits (Layer 1b)", abbrev_hits)
-            with col3:
-                if "diagnostics" in st.session_state:
-                    exact_hits = sum(1 for d in st.session_state["diagnostics"] if d and "Exact: HIT" in " ".join(d.get("layer1_attempts", [])))
-                    st.metric("Exact Hits (Layer 1c)", exact_hits)
-
-        # Human override for unresolved
-        if len(unresolved) > 0:
-            st.markdown("---")
-            st.markdown("#### 🛠️ Human Override — Unresolved Items")
-            st.warning(f"{len(unresolved)} items need manual resolution.")
-            current_cache = load_cache_db()
-
-            for idx, row in unresolved.iterrows():
-                st.markdown(f"**SKU:** `{row['SKU']}` | **Raw:** *\"{row['Original Invoice Tag']}\"* | **Cleaned:** `{row['Cleaned Token']}`")
-                chosen = st.selectbox(
-                    "Map to registry:",
-                    ["— Skip —"] + master_registry["generic_name"].tolist(),
-                    key=f"override_{idx}"
-                )
-                if chosen != "— Skip —":
-                    reg_row = master_registry[master_registry["generic_name"] == chosen]
-                    current_cache[row["_hash"]] = {
-                        "generic_name": chosen,
-                        "brand_name":   str(reg_row.iloc[0]["brand_name"]) if not reg_row.empty else "N/A",
-                        "system_id":    str(reg_row.iloc[0]["system_id"])  if not reg_row.empty else "N/A",
-                    }
-
-            if st.button("💾 Commit Overrides to Layer 1 Cache"):
-                save_cache_db(current_cache)
-                st.success("Overrides written to cache. These will resolve instantly on next run.")
-                st.session_state.pop("run_id", None)
-                st.rerun()
-
-        # Export
-        st.markdown("---")
-        st.markdown("#### 📤 Export")
-        ex1, ex2 = st.columns(2)
-        with ex1:
-            clean_cols = ["SKU", j_profile["generic_label"], j_profile["brand_label"],
-                          "Invoice Price", "Registry Baseline", "Price Variance", "Audit Verdict"]
-            clean_export = display_df[[c for c in clean_cols if c in display_df.columns]]
-            st.download_button(
-                "📦 Clean PMS File",
-                data=clean_export.to_csv(index=False).encode(),
-                file_name=f"apex_pms_{jurisdiction.lower()}.csv",
-                mime="text/csv"
-            )
-        with ex2:
-            st.download_button(
-                "🔎 Full Audit Workbook",
-                data=display_df.to_csv(index=False).encode(),
-                file_name=f"apex_audit_{jurisdiction.lower()}.csv",
-                mime="text/csv"
-            )
-
-    else:
-        st.write("---")
-        st.info("Upload an invoice to begin.")
