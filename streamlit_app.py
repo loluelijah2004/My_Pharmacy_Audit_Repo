@@ -16,15 +16,56 @@ except ImportError:
     OPENAI_AVAILABLE = False
 
 # =====================================================================
-# 1. PLATFORM CONFIGURATION & JURISDICTIONAL TAXONOMY
+# 0. PLATFORM CONFIGURATION & JURISDICTIONAL TAXONOMY
 # =====================================================================
 st.set_page_config(
-    page_title="Apex Logic | Global Pharmacy Audit",
-    page_icon="▲",
+    page_title="Apex Logic | Professional Invoice Harmonization",
+    page_icon="🧬",
     layout="wide",
     initial_sidebar_state="expanded"
 )
+# Initialize session states for navigation and authentication
+if "page" not in st.session_state:
+    st.session_state.page = "landing"
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+if "audit_data" not in st.session_state:
+    st.session_state["audit_data"] = None
+if "run_id" not in st.session_state:
+    st.session_state["run_id"] = None
 
+# Safely extract Whop API Token from Streamlit Secrets
+WHOP_API_KEY = st.secrets.get("WHOP_API_KEY", "")
+
+# =====================================================================
+# 0b. WHOP AUTHENTICATION FUNCTION
+# =====================================================================
+def check_whop_authorization(membership_id: str) -> bool:
+    """Verifies membership directly with Whop's ledger. Locks out unauthorized shares."""
+    
+    # 🛠️ THE DEVELOPER BACKDOOR (Remove or change before public launch!)
+    if membership_id == "apex_admin_2026":
+        return True
+        
+    if not membership_id or not WHOP_API_KEY:
+        return False
+        
+    url = f"https://api.whop.com/v5/memberships/{membership_id}"
+    headers = {
+        "Authorization": f"Bearer {WHOP_API_KEY}", 
+        "Accept": "application/json"
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=5)
+        if response.status_code == 200:
+            return response.json().get("status") == "active"
+    except Exception:
+        return False
+    return False
+    
+# =====================================================================
+# 1. PLATFORM CONFIGURATION & JURISDICTIONAL TAXONOMY
+# =====================================================================
 st.markdown("""
     <style>
         .brand-header { font-size: 42px; font-weight: 800; letter-spacing: 2px; color: #FFFFFF; margin-bottom: 0px; }
@@ -134,11 +175,76 @@ def strip_noise(raw: str) -> str:
     name = re.sub(r'\b[a-zA-Z]\b', '', name).strip()
     return " ".join(name.split())
 
-
 # =====================================================================
-# 4. MASTER REGISTRY LOADER
-#    master_registry.csv has baseline prices but omits many common drugs.
-#    Regional FDA / NHS / DPD files supplement the searchable drug list.
+# 4. CONTEXT-AWARE DOSAGE MATCHING (NEW LAYER 1 ENHANCEMENT)
+# =====================================================================
+_DOSAGE_PATTERN = re.compile(
+    r'(\d+(?:\.\d+)?)\s*(?:mg|mcg|g|ml|iu|units?)\b',
+    re.IGNORECASE
+)
+_FORM_PATTERN = re.compile(
+    r'\b(tab|tabs|cap|caps|capsule|capsules|'
+    r'er|sr|xr|xl|dr|eff|effervescent|inj|injection|'
+    r'soln?|solution|susp|suspension|cream|gel|ointment|patch|spray)\b',
+    re.IGNORECASE
+)
+
+def extract_dosage_context(raw_text: str) -> dict:
+    """Extract dosage strength and form from invoice text."""
+    context = {"strength": None, "form": None, "raw": raw_text}
+    
+    strength_match = _DOSAGE_PATTERN.search(raw_text)
+    if strength_match:
+        context["strength"] = strength_match.group(0).lower()
+    
+    form_match = _FORM_PATTERN.search(raw_text)
+    if form_match:
+        context["form"] = form_match.group(1).lower()
+    
+    return context
+
+def score_registry_match_with_context(
+    resolved_name: str,
+    context: dict,
+    master_df: pd.DataFrame
+) -> tuple[str, float]:
+    """Score registry matches based on dosage/form alignment."""
+    if master_df.empty or not resolved_name:
+        return resolved_name, 0.0
+    
+    matching_rows = master_df[
+        master_df["generic_name"].astype(str).str.lower().str.contains(
+            resolved_name.lower(), regex=False, na=False
+        )
+    ]
+    
+    if matching_rows.empty:
+        return resolved_name, 0.0
+    
+    if len(matching_rows) == 1:
+        return str(matching_rows.iloc[0]["generic_name"]), 0.0
+    
+    best_match = resolved_name
+    best_score = 0.0
+    
+    for _, row in matching_rows.iterrows():
+        registry_name = str(row["generic_name"]).lower()
+        score = 0.0
+        
+        if context.get("strength") and context["strength"] in registry_name:
+            score += 0.5
+        
+        if context.get("form") and context["form"] in registry_name:
+            score += 0.3
+        
+        if score > best_score or (score == best_score and len(registry_name) < len(best_match.lower())):
+            best_score = score
+            best_match = str(row["generic_name"])
+    
+    return best_match, best_score
+    
+# =====================================================================
+# 5. MASTER REGISTRY LOADER
 # =====================================================================
 _COL_RENAME = {
     "standard_name": "generic_name", "drug_name": "generic_name",
@@ -188,7 +294,6 @@ def _base_ingredient(name: str) -> str:
     text = re.split(r"[/+]", text)[0].strip()
     return " ".join(w.capitalize() for w in text.split())
 
-
 @st.cache_data
 def _load_full_registry(_version: str = DATA_VERSION) -> pd.DataFrame:
     """Load master_registry.csv. _version param busts cache when DATA_VERSION changes."""
@@ -199,7 +304,6 @@ def _load_full_registry(_version: str = DATA_VERSION) -> pd.DataFrame:
         return _normalize_registry_columns(pd.read_csv(csv_path))
     except Exception:
         return pd.DataFrame()
-
 
 @st.cache_data
 def _load_pharmacy_core(region_key: str, data_dir: str, _version: str = DATA_VERSION) -> pd.DataFrame:
@@ -253,7 +357,6 @@ def _merge_registry_sources(
     merged = pd.DataFrame(rows).drop(columns=["_src", "generic_key"], errors="ignore")
     return merged.drop_duplicates(subset=["generic_name"], keep="first").reset_index(drop=True)
 
-
 @st.cache_data
 def _load_regional_supplement(region_key: str, data_dir: str, _version: str = DATA_VERSION) -> pd.DataFrame:
     """Load FDA / NHS / DPD regional file to fill gaps in master_registry."""
@@ -272,7 +375,6 @@ def _load_regional_supplement(region_key: str, data_dir: str, _version: str = DA
         return df.drop(columns=["_base"])
     except Exception:
         return pd.DataFrame()
-
 
 def load_jurisdictional_registry(region: str) -> pd.DataFrame:
     profile    = JURISDICTION_PROFILES.get(region, {})
@@ -306,7 +408,6 @@ def load_jurisdictional_registry(region: str) -> pd.DataFrame:
             "⚠️ Only baseline prices loaded — common drug names and proprietary labels may be missing."
         )
     return merged
-
 
 @st.cache_data
 def build_registry_index(_registry_key: str, generic_names: tuple, _version: str = DATA_VERSION) -> dict[str, int]:
@@ -356,7 +457,6 @@ def build_registry_index(_registry_key: str, generic_names: tuple, _version: str
         if len(first) >= 6 and (first not in index or len(generic) < len(str(generic_names[index[first]]))):
             index[first] = i
     return index
-
 
 def resolve_in_registry(
     candidate: str,
@@ -423,9 +523,8 @@ def resolve_in_registry(
         return str(master_df.iloc[best_idx]["generic_name"]), best_idx
     return None, None
 
-
 # =====================================================================
-# 5. LAYER 1: DETERMINISTIC ABBREVIATION LOOKUP
+# 6. LAYER 1: DETERMINISTIC ABBREVIATION LOOKUP
 #    Loads custom abbreviations from an external abbreviations.json file.
 # =====================================================================
 
@@ -584,9 +683,8 @@ def abbrev_lookup_fallback(clean_token: str, abbrev_items: tuple, master_df: pd.
 
     return None, None
 
-
 # =====================================================================
-# 6. PHASE 3 — LAYER 2: TF-IDF COSINE SIMILARITY
+# 7. PHASE 3 — LAYER 2: TF-IDF COSINE SIMILARITY
 #    Character n-gram TF-IDF vectorised against the entire registry at
 #    once — O(1) lookup regardless of registry size. No row-by-row loop.
 #    BUG FIX: TF-IDF threshold was 0.92 which is unreachable for short
@@ -649,7 +747,7 @@ def tfidf_match_batch(
 
 
 # =====================================================================
-# 7. PHASE 4 — LAYER 3: GEMINI AI FALLBACK
+# 8. PHASE 4 — LAYER 3: GEMINI AI FALLBACK
 #    Only called when both Layer 1 and Layer 2 fail.
 #    BUG FIX: Added explicit secret-missing warning in sidebar.
 #    Results cached in session_state["ai_cache"] so same input never
@@ -705,10 +803,127 @@ def call_gemini_api(raw_input: str, clean_token: str,
     except Exception as e:
         return {"status": "error", "reason": str(e)}
 
+# =====================================================================
+# 9. MAIN ROUTING LOGIC - LANDING PAGE, LOGIN, AND APP ENGINE
+# =====================================================================
+# LANDING PAGE (Unauthenticated Users)
+if st.session_state.page == "landing":
+    
+    # Navigation Bar
+    nav_col1, nav_col2 = st.columns([8, 2])
+    with nav_col1:
+        st.markdown("### 🧬 **APEX LOGIC**")
+    with nav_col2:
+        if st.button("🔒 Client Login Portal", use_container_width=True, type="secondary"):
+            st.session_state.page = "login"
+            st.rerun()
 
-# =====================================================================
-# 8. MAIN RECONCILIATION PIPELINE
-# =====================================================================
+    st.markdown("---")
+
+    # Hero Section
+    hero_col1, hero_col2 = st.columns([6, 4])
+    with hero_col1:
+        st.markdown('<p class="hero-title">Stop Manually Wrestling with <span class="accent-text">Pharmacy Vendor Invoices</span>.</p>', unsafe_allow_html=True)
+        st.markdown('<p class="sub-hero">The automated data harmonization engine built for modern pharmacies. Instantly scrub, standardize, and format messy supplier spreadsheets across the UK, Canada, and the US.</p>', unsafe_allow_html=True)
+    with hero_col2:
+        st.info(
+            "📦 **Data Pipeline Ingestion Stream**\n\n"
+            "→ `PCM 500mg (UK)` *(Messy Vendor Invoiced Shorthand)*\n\n"
+            "⚡ *Apex Harmonization Matrix Processing...*\n\n"
+            "→ **Paracetamol 500mg Tablet (Active Canonical ID: 104)**"
+        )
+
+    st.markdown("##")
+    st.markdown("---")
+    
+    # Value Proposition
+    st.markdown("### 🛠️ Enterprise Data Infrastructure")
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        st.markdown("#### 🔍 Who We Are")
+        st.write("An advanced data-cleaning and harmonization layer engineered specifically to eliminate structural friction in complex pharmaceutical supply chains.")
+    with p2:
+        st.markdown("#### ⚡ What It Does")
+        st.write("We ingest completely unstandardized, abbreviated retail pharmacy invoices. The platform instantly purges human errors, shorthand typos, and mismatched naming conventions.")
+    with p3:
+        st.markdown("#### 🚀 Why We Are Better")
+        st.write("Zero manual labor. Our framework scales effortlessly across Health Canada, UK NHS, and US baseline registries with an evolutionary dynamic caching layer.")
+
+    st.markdown("##")
+    st.markdown("---")
+
+    # Scarcity Banner
+    st.warning(
+        "🚀 **Global Pilot Group Initiative (Strictly Limited)**: To seed our foundational pilot group across our launch regions, "
+        "We are offering an exclusive **50% lifetime discount** to the first **5 pharmacies** to register in the UK, Canada, and the US. "
+        "Use code **`APEXEARLY50`** at checkout. Once the 5th slot in your region is filled, the system automatically reverts to regular pricing."
+    )
+
+    # Pricing Tiers
+    st.markdown("### 💳 Corporate Deployment Packages")
+    tier1_col, tier2_col, tier3_col = st.columns(3)
+    
+    with tier1_col:
+        st.markdown("""
+        <div class="price-card">
+            <h4>📦 Tier 1: Standalone Toolkit</h4>
+            <h2>£99 <span style="font-size:1rem;color:#A0AEC0">One-Time Payment</span></h2>
+            <hr style="border-color:#2D3748">
+            <p style="margin-bottom:0.5rem;">• Full master abbreviation mapping package (abbreviations.json)</p>
+            <p style="margin-bottom:0.5rem;">• Local pipeline implementation and audit templates</p>
+            <p style="margin-bottom:0.5rem;">• Optimized for internal development and localized audit setups</p>
+        </div>
+        """, unsafe_allow_html=True)
+        st.link_button("Get Standalone Kit", "https://whop.com/your-tier-1-checkout-link", use_container_width=True)
+
+    with tier2_col:
+        st.markdown("""
+        <div class="price-card-premium">
+            <h4>🧬 Tier 2: Cloud Instance Software Access</h4>
+            <h2>£499 <span style="font-size:1rem;color:#A0AEC0">/ Month</span></h2>
+            <hr style="border-color:#00FFBB">
+            <p style="margin-bottom:0.5rem;">• Infinite, automated 24/7 web application invoice uploads</p>
+            <p style="margin-bottom:0.5rem;">• Multi-regional database compliance (UK, Canada, US formats)</p>
+            <p style="margin-bottom:0.5rem;">• Absolute cross-border matrix validation engine</p>
+        </div>
+        """, unsafe_allow_html=True)
+        st.link_button("Launch Cloud Engine", "https://whop.com/your-tier-2-checkout-link", type="primary", use_container_width=True)
+
+    with tier3_col:
+        st.markdown("""
+        <div class="price-card">
+            <h4>🏢 Tier 3: Bespoke Enterprise Integration</h4>
+            <h2>£2,500 <span style="font-size:1rem;color:#A0AEC0">Setup</span> + £250<span style="font-size:1rem;color:#A0AEC0">/Mo</span></h2>
+            <hr style="border-color:#2D3748">
+            <p style="margin-bottom:0.5rem;">• Custom logic mapped directly to your specific PMS layouts</p>
+            <p style="margin-bottom:0.5rem;">• Secure automated webhooks and pipeline scripts</p>
+            <p style="margin-bottom:0.5rem;">• Priority server allocation & dedicated architecture kickoff strategy call</p>
+        </div>
+        """, unsafe_allow_html=True)
+        st.link_button("Book Integration Call", "https://calendly.com/your-link", use_container_width=True)
+
+# LOGIN PAGE (Authentication Gateway)
+elif st.session_state.page == "login" and not st.session_state.authenticated:
+    st.markdown("### 🔒 Enterprise System Authentication")
+    st.write("Please authenticate your active subscription to unlock the multi-regional cleaning infrastructure.")
+    
+    input_key = st.text_input("Enter your Whop Membership Key:", type="password")
+    
+    l_col1, l_col2 = st.columns(2)
+    with l_col1:
+        if st.button("Unlock Core Dashboard", type="primary", use_container_width=True):
+            if check_whop_authorization(input_key):
+                st.session_state.authenticated = True
+                st.session_state.page = "app"
+                st.success("Access Authorized. Initializing engine matrix...")
+                st.rerun()
+            else:
+                st.error("Access Denied. Invalid, expired, or inactive membership key.")
+    with l_col2:
+        if st.button("⬅️ Back to Storefront Overview", use_container_width=True):
+            st.session_state.page = "landing"
+            st.rerun()
+            
 def run_reconciliation(client_df: pd.DataFrame, master_df: pd.DataFrame,
                        jurisdiction: str, l2_threshold: float,
                        use_ai: bool, verbose: bool = False) -> pd.DataFrame:
@@ -943,7 +1158,7 @@ def run_reconciliation(client_df: pd.DataFrame, master_df: pd.DataFrame,
 
 
 # =====================================================================
-# 9. DISPLAY HELPER
+# 10. DISPLAY HELPER
 # =====================================================================
 def style_rows(row):
     # Use .get() to safely check for multiple possible column names
@@ -955,9 +1170,9 @@ def style_rows(row):
     return [''] * len(row)
 
 # =====================================================================
-# 10. UI
+# 11. UI
 # =====================================================================
-st.markdown('<div class="brand-header">▲ APEX LOGIC</div>', unsafe_allow_html=True)
+st.markdown('<div class="brand-header">🧬 APEX LOGIC</div>', unsafe_allow_html=True)
 st.markdown('<div class="brand-subtitle">GLOBAL PHARMACY AUDIT ENGINE</div>', unsafe_allow_html=True)
 
 tab_overview, tab_workspace = st.tabs(["🏠 Platform Overview", "⚡ Automated Audit Suite"])
@@ -979,7 +1194,7 @@ with tab_overview:
 | Layer | Method | Example |
 |---|---|---|
 | **Layer 1a** | Hash cache (persistent) | Same supplier + drug → instant hit |
-| **Layer 1b** | Abbreviation dictionary (80+ shortcuts) | `MET → Metformin`, `PCM → Paracetamol` |
+| **Layer 1b** | Abbreviation dictionary (150+ shortcuts) | `MET → Metformin`, `PCM → Paracetamol` |
 | **Layer 1c** | Exact name match after noise strip | `LISINOPRIL 5MG TABS` → `Lisinopril` |
 | **Layer 2** | TF-IDF char n-gram cosine similarity | `SERTRALINE` → `Sertraline` |
 | **Layer 3** | Gemini AI (bounded JSON schema) | Anything ambiguous |
