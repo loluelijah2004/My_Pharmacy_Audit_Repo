@@ -97,27 +97,61 @@ st.markdown("""
             font-family: 'Poppins', sans-serif;
         }
         
-        .hero-title {
-            font-size: 4.5rem;
+        .apex-logo {
+            font-size: 3.5rem;
             font-weight: 800;
-            line-height: 1.2;
+            color: #FFFFFF;
+            font-family: 'Poppins', sans-serif;
+            margin: 0;
+            padding: 0;
+            line-height: 1;
+        }
+        
+        .hero-title {
+            font-size: 5.5rem;
+            font-weight: 800;
+            line-height: 1.1;
             color: #FFFFFF;
             font-family: 'Poppins', sans-serif;
             margin-bottom: 1.5rem;
+            margin-top: 0;
         }
         
         .sub-hero {
-            font-size: 1.5rem;
+            font-size: 1.8rem;
             font-weight: 400;
             line-height: 1.6;
             color: #E2E8F0;
             font-family: 'Inter', sans-serif;
             margin-bottom: 2rem;
+            margin-top: 0;
         }
         
         .accent-text {
             color: #00FFCC;
             font-weight: 700;
+        }
+        
+        .pipeline-box {
+            background: linear-gradient(135deg, #0F766E 0%, #14B8A6 100%);
+            border: 2px solid #00FFCC;
+            border-radius: 12px;
+            padding: 24px;
+            color: #FFFFFF;
+            font-family: 'Inter', sans-serif;
+        }
+        
+        .pipeline-title {
+            font-size: 1.3rem;
+            font-weight: 700;
+            margin-bottom: 1rem;
+            color: #FFFFFF;
+        }
+        
+        .pipeline-step {
+            font-size: 1rem;
+            margin: 0.8rem 0;
+            color: #E2E8F0;
         }
         
         .price-card {
@@ -151,9 +185,10 @@ st.markdown("""
         
         .flag-badge {
             display: inline-block;
-            font-size: 2rem;
+            font-size: 1.8rem;
             margin-right: 0.5rem;
             vertical-align: middle;
+            letter-spacing: 0.2rem;
         }
         
         .pharmacy-bg {
@@ -161,7 +196,34 @@ st.markdown("""
             background-size: 200px 200px;
             background-attachment: fixed;
         }
+        
+        .landing-page-bg {
+            background: linear-gradient(135deg, rgba(26, 32, 44, 0.85) 0%, rgba(15, 118, 110, 0.85) 100%);
+            background-attachment: fixed;
+            min-height: 100vh;
+        }
+        
+        /* Landing page background image styling */
+        [data-testid="stAppViewContainer"] {
+            background-image: url('file:///Pharmacy.jpg');
+            background-size: cover;
+            background-position: center;
+            background-attachment: fixed;
+        }
     </style>
+    
+    <script>
+        // Apply Pharmacy.jpg background to landing page
+        document.addEventListener('DOMContentLoaded', function() {
+            const appContainer = document.querySelector('[data-testid="stAppViewContainer"]');
+            if (appContainer) {
+                appContainer.style.backgroundImage = "url('Pharmacy.jpg')";
+                appContainer.style.backgroundSize = "cover";
+                appContainer.style.backgroundPosition = "center";
+                appContainer.style.backgroundAttachment = "fixed";
+            }
+        });
+    </script>
 """, unsafe_allow_html=True)
 
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -1114,7 +1176,7 @@ def style_rows(row):
 if st.session_state.page == "landing":
     nav_col1, nav_col2 = st.columns([8, 2])
     with nav_col1:
-        st.markdown("### 🧬 **APEX LOGIC**")
+        st.markdown('<div class="apex-logo">🧬 APEX LOGIC</div>', unsafe_allow_html=True)
     with nav_col2:
         if st.button("🔒 Client Login Portal", use_container_width=True, type="secondary"):
             st.session_state.page = "login"
@@ -1126,7 +1188,16 @@ if st.session_state.page == "landing":
         st.markdown('<p class="hero-title">Stop Manually Wrestling with <span class="accent-text">Pharmacy Vendor Invoices</span>.</p>', unsafe_allow_html=True)
         st.markdown('<p class="sub-hero">The automated data harmonization engine built for modern pharmacies. Instantly scrub, standardize, and format messy supplier spreadsheets across the UK, Canada, and the US.</p>', unsafe_allow_html=True)
     with hero_col2:
-        st.info("📦 **Data Pipeline Ingestion Stream**\n\n→ `PCM 500mg (UK)` *(Messy Vendor Invoiced Shorthand)*\n\n⚡ *Apex Harmonization Matrix Processing...*\n\n→ **Paracetamol 500mg Tablet (Active Canonical ID: 104)**")
+        st.markdown("""
+            <div class="pipeline-box">
+                <div class="pipeline-title">📦 Data Pipeline Ingestion Stream</div>
+                <div class="pipeline-step">→ <strong>PCM 500mg (UK)</strong></div>
+                <div style="font-size: 0.9rem; color: #B0E0D8; margin: 0.5rem 0;">Messy Vendor Invoiced Shorthand</div>
+                <div class="pipeline-step" style="margin-top: 1rem;">⚡ <em>Apex Harmonization Matrix Processing...</em></div>
+                <div class="pipeline-step" style="margin-top: 1rem;">→ <strong>Paracetamol 500mg Tablet</strong></div>
+                <div style="font-size: 0.9rem; color: #B0E0D8;">Standardized & Verified</div>
+            </div>
+        """, unsafe_allow_html=True)
 
     st.markdown("##")
     st.markdown("---")
@@ -1152,7 +1223,7 @@ if st.session_state.page == "landing":
         st.markdown('<div class="price-card"><h4><span class="flag-badge">🇺🇸 🇨🇦 🇬🇧</span> Tier 1: Standalone Toolkit</h4><h2>$149 <span style="font-size:1rem;color:#A0AEC0">One-Time Payment</span></h2><hr style="border-color:#2D3748"><p style="margin-bottom:0.5rem;">• Full master abbreviation mapping package (abbreviations.json)</p><p style="margin-bottom:0.5rem;">• Local pipeline implementation and audit templates</p><p style="margin-bottom:0.5rem;">• Optimized for internal development and localized audit setups</p></div>', unsafe_allow_html=True)
         st.link_button("Get Standalone Kit", "https://whop.com/your-tier-1-checkout-link", use_container_width=True)
     with tier2_col:
-        st.markdown('<div class="price-card-premium"><h4><span class="flag-badge">🇺🇸 🇨🇦 ��🇧</span> Tier 2: Cloud Instance Software Access</h4><h2>$699 <span style="font-size:1rem;color:#A0AEC0">/ Month</span></h2><hr style="border-color:#00FFBB"><p style="margin-bottom:0.5rem;">• Infinite, automated 24/7 web application invoice uploads</p><p style="margin-bottom:0.5rem;">• Multi-regional database compliance (UK, Canada, US formats)</p><p style="margin-bottom:0.5rem;">• Absolute cross-border matrix validation engine</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="price-card-premium"><h4><span class="flag-badge">🇺🇸 🇨🇦 🇬🇧</span> Tier 2: Cloud Instance Software Access</h4><h2>$699 <span style="font-size:1rem;color:#A0AEC0">/ Month</span></h2><hr style="border-color:#00FFBB"><p style="margin-bottom:0.5rem;">• Infinite, automated 24/7 web application invoice uploads</p><p style="margin-bottom:0.5rem;">• Multi-regional database compliance (UK, Canada, US formats)</p><p style="margin-bottom:0.5rem;">• Absolute cross-border matrix validation engine</p></div>', unsafe_allow_html=True)
         st.link_button("Launch Cloud Engine", "https://whop.com/your-tier-2-checkout-link", type="primary", use_container_width=True)
     with tier3_col:
         st.markdown('<div class="price-card"><h4><span class="flag-badge">🇺🇸 🇨🇦 🇬🇧</span> Tier 3: Bespoke Enterprise Integration</h4><h2>$3,500 <span style="font-size:1rem;color:#A0AEC0">Setup</span> + $299<span style="font-size:1rem;color:#A0AEC0">/Mo</span></h2><hr style="border-color:#2D3748"><p style="margin-bottom:0.5rem;">• Custom logic mapped directly to your specific PMS layouts</p><p style="margin-bottom:0.5rem;">• Secure automated webhooks and pipeline scripts</p><p style="margin-bottom:0.5rem;">• Priority server allocation & dedicated architecture kickoff strategy call</p></div>', unsafe_allow_html=True)
@@ -1198,7 +1269,24 @@ if st.session_state.authenticated or st.session_state.page == "app":
         st.write("---")
         with st.container(border=True):
             st.markdown("<small>🔒 **ARCHITECTURAL BOUNDARY**</small>", unsafe_allow_html=True)
-            st.caption("No EMR/EHR or eRx connectivity. Financial reconciliation only.")
+            st.markdown("""
+            <small style="line-height: 1.6; color: #A0AEC0;">
+            <strong>Data Scope:</strong> This application processes <strong>financial invoice data only</strong>.
+            <br><br>
+            <strong>What We Do NOT Store:</strong>
+            <br>• ❌ Patient names, medical record numbers, or identifiers
+            <br>• ❌ Prescription details or clinical diagnoses
+            <br>• ❌ EMR/EHR records or eRx connectivity
+            <br>• ❌ Protected Health Information (PHI) under HIPAA/GDPR
+            <br><br>
+            <strong>What We Process:</strong>
+            <br>• ✅ Drug names, dosages, and quantities from vendor invoices
+            <br>• ✅ Pricing and cost reconciliation data
+            <br>• ✅ Supplier and pharmacy operational metrics
+            <br><br>
+            <strong>Compliance:</strong> Financial reconciliation engine only. No clinical data handling.
+            </small>
+            """, unsafe_allow_html=True)
         st.markdown("### 🏛️ Enterprise Support")
         st.link_button("💻 Service Desk", url="https://support.apexlogic.ai/portal", use_container_width=True)
         st.link_button("📞 Priority Callback", url="mailto:enterprise-ops@apexlogic.ai?subject=URGENT", use_container_width=True)
