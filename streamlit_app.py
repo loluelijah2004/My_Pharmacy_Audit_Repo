@@ -246,7 +246,7 @@ ABBREV_FILE = os.path.join(BASE_PATH, "abbreviations.json")
 # abbreviations.json changes. This busts all @st.cache_data caches
 # that depend on registry/abbreviation data so Streamlit picks up
 # the new file contents immediately without a server restart.
-DATA_VERSION = "v7"
+DATA_VERSION = "v8"
 
 # Canonical targets for _PHARMA_OVERRIDES — defined early so _cache_is_plausible
 # can reference them without a forward-reference NameError.
@@ -256,17 +256,67 @@ _PHARMA_OVERRIDE_TARGETS: frozenset[str] = frozenset({
     "amoxicillin", "tramadol", "levothyroxine", "amlodipine", "lisinopril",
     "atorvastatin", "simvastatin", "omeprazole", "losartan", "pantoprazole",
     "sertraline", "fluoxetine", "prednisone", "metoprolol", "albuterol",
-    "amoxicillin/clavulanate", "prednisone",
+    "amoxicillin/clavulanate",
+    # Extended set — added v8
+    "warfarin", "sitagliptin", "tadalafil", "hydrochlorothiazide",
+    "hydrocortisone", "spironolactone", "liraglutide", "sildenafil",
+    "vardenafil", "rivaroxaban", "alogliptin", "venlafaxine", "linagliptin",
+    "miglitol", "voglibose", "exenatide", "tamsulosin", "medroxyprogesterone",
+    "apixaban", "ticagrelor", "furosemide", "cetirizine", "fexofenadine",
+    "diltiazem", "verapamil", "ranitidine", "famotidine", "atenolol",
+    "insulin", "pravastatin", "fluticasone", "valsartan", "montelukast",
+    "avanafil", "alfuzosin", "norepinephrine", "propylthiouracil", "acarbose",
+    "dulaglutide", "liothyronine", "methylprednisolone", "paroxetine",
+    "rosiglitazone", "clopidogrel", "ciprofloxacin", "digoxin", "azithromycin",
+    "testosterone", "dexamethasone", "aspirin",
 })
 
 def load_cache_db() -> dict:
-    if os.path.exists(CACHE_FILE):
+    """Load the persistent cache, auto-purging any stale/wrong entries.
+
+    AUTO-PURGE LOGIC:
+    Each cache entry stores {hash_key: {generic_name, brand_name, system_id}}.
+    The hash_key encodes the original invoice token. We extract the clean token
+    from the hash and check whether the cached generic_name conflicts with what
+    _PHARMA_OVERRIDES would now return for that token. If it conflicts, the
+    entry is silently dropped so the pipeline re-resolves it correctly.
+    """
+    if not os.path.exists(CACHE_FILE):
+        return {}
+    try:
+        with open(CACHE_FILE, "r") as f:
+            raw: dict = json.load(f)
+    except Exception:
+        return {}
+
+    # Build a reverse lookup: clean_token -> correct_drug from _PHARMA_OVERRIDES
+    # Hash keys are formatted as "supplier||clean_token" or just "clean_token"
+    purged = 0
+    clean_cache = {}
+    for hash_key, entry in raw.items():
+        if not isinstance(entry, dict):
+            continue
+        cached_name = str(entry.get("generic_name", "")).strip()
+        # Extract the token portion from the hash key (last segment after ||)
+        token_part = hash_key.split("||")[-1].lower().strip()
+        # Check if _PHARMA_OVERRIDES has an authoritative mapping for this token
+        override_name = _PHARMA_OVERRIDES.get(token_part)
+        if override_name and cached_name.lower() != override_name.lower():
+            # Stale entry — cached drug doesn't match current authoritative mapping
+            purged += 1
+            continue  # Drop it; pipeline will re-resolve correctly
+        clean_cache[hash_key] = entry
+
+    if purged > 0:
+        # Save the cleaned cache back to disk
         try:
-            with open(CACHE_FILE, "r") as f:
-                return json.load(f)
+            with open(CACHE_FILE, "w") as f:
+                json.dump(clean_cache, f, indent=2)
         except Exception:
-            return {}
-    return {}
+            pass
+
+    return clean_cache
+
 
 def save_cache_db(data: dict):
     try:
@@ -284,6 +334,30 @@ def clear_cache_db():
             pass
     if "ai_cache" in st.session_state:
         st.session_state["ai_cache"] = {}
+
+
+def persist_pharmacist_override(token: str, correct_drug: str) -> bool:
+    """Permanently save a pharmacist-confirmed mapping to abbreviations.json.
+
+    This ensures that next time an invoice contains the same abbreviation,
+    the system resolves it correctly without requiring another manual override.
+    Returns True if saved successfully, False if the file could not be written
+    (e.g. read-only filesystem on Streamlit Cloud).
+    """
+    try:
+        with open(ABBREV_FILE, "r", encoding="utf-8") as f:
+            abbrevs: dict = json.load(f)
+        abbrevs[token.lower().strip()] = correct_drug
+        with open(ABBREV_FILE, "w", encoding="utf-8") as f:
+            json.dump(abbrevs, f, indent=2, ensure_ascii=False)
+        # Also update _PHARMA_OVERRIDES in-memory so the running session
+        # immediately benefits from the correction without a restart.
+        _PHARMA_OVERRIDES[token.lower().strip()] = correct_drug
+        _PHARMA_OVERRIDE_TARGETS_mutable = set(_PHARMA_OVERRIDE_TARGETS)
+        _PHARMA_OVERRIDE_TARGETS_mutable.add(correct_drug.lower())
+        return True
+    except Exception:
+        return False
 
 
 def _cache_is_plausible(clean_token: str, generic_name: str) -> bool:
@@ -703,6 +777,13 @@ _PHARMA_OVERRIDES = {
     "tram":   "Tramadol",
     "levo":   "Levothyroxine",
     "amlo":   "Amlodipine",
+    "asp":    "Aspirin",
+    "dex":    "Dexamethasone",
+    "hct":    "Hydrochlorothiazide",
+    "lis":    "Lisinopril",
+    "praz":   "Prazosin",
+    "alo":    "Alogliptin",
+    "lio":    "Liothyronine",
     # 5-6 char codes
     "lisino": "Lisinopril",
     "atorva": "Atorvastatin",
@@ -718,12 +799,103 @@ _PHARMA_OVERRIDES = {
     "metfor": "Metformin",
     "albu":   "Albuterol",
     "salbu":  "Albuterol",
-    "losart": "Losartan",
     "levoth": "Levothyroxine",
     "sertr":  "Sertraline",
     "fluoxe": "Fluoxetine",
     "prednis":"Prednisone",
     "metopro":"Metoprolol",
+    # v8 additions — new drug abbreviations
+    "sita":   "Sitagliptin",
+    "tada":   "Tadalafil",
+    "hctz":   "Hydrochlorothiazide",
+    "hydro":  "Hydrocortisone",
+    "meth":   "Metformin",
+    "spiro":  "Spironolactone",
+    "lira":   "Liraglutide",
+    "sild":   "Sildenafil",
+    "vard":   "Vardenafil",
+    "rivar":  "Rivaroxaban",
+    "venlaf": "Venlafaxine",
+    "lina":   "Linagliptin",
+    "migli":  "Miglitol",
+    "vogli":  "Voglibose",
+    "exen":   "Exenatide",
+    "tams":   "Tamsulosin",
+    "medroxy":"Medroxyprogesterone",
+    "apix":   "Apixaban",
+    "tica":   "Ticagrelor",
+    "lasix":  "Furosemide",
+    "furo":   "Furosemide",
+    "ceti":   "Cetirizine",
+    "fexo":   "Fexofenadine",
+    "dilt":   "Diltiazem",
+    "vera":   "Verapamil",
+    "rani":   "Ranitidine",
+    "famo":   "Famotidine",
+    "aten":   "Atenolol",
+    "prav":   "Pravastatin",
+    "flut":   "Fluticasone",
+    "flud":   "Fluticasone",
+    "vals":   "Valsartan",
+    "mont":   "Montelukast",
+    "avana":  "Avanafil",
+    "avan":   "Avanafil",
+    "alfuz":  "Alfuzosin",
+    "alfu":   "Alfuzosin",
+    "norepi": "Norepinephrine",
+    "nore":   "Norepinephrine",
+    "propyl": "Propylthiouracil",
+    "ptu":    "Propylthiouracil",
+    "acarb":  "Acarbose",
+    "acar":   "Acarbose",
+    "dulag":  "Dulaglutide",
+    "dula":   "Dulaglutide",
+    "liothy": "Liothyronine",
+    "methyl": "Methylprednisolone",
+    "methpred":"Methylprednisolone",
+    "parox":  "Paroxetine",
+    "rosi":   "Rosiglitazone",
+    "clop":   "Clopidogrel",
+    "cipro":  "Ciprofloxacin",
+    "digox":  "Digoxin",
+    "azith":  "Azithromycin",
+    "test":   "Testosterone",
+    "testo":  "Testosterone",
+    "warfar": "Warfarin",
+    "warfarin":"Warfarin",
+    "sitag":  "Sitagliptin",
+    "tadal":  "Tadalafil",
+    "spiron": "Spironolactone",
+    "lirag":  "Liraglutide",
+    "silden": "Sildenafil",
+    "varden": "Vardenafil",
+    "rivarox":"Rivaroxaban",
+    "venla":  "Venlafaxine",
+    "linag":  "Linagliptin",
+    "miglit": "Miglitol",
+    "voglib": "Voglibose",
+    "exenat": "Exenatide",
+    "tamsu":  "Tamsulosin",
+    "apixab": "Apixaban",
+    "ticagr": "Ticagrelor",
+    "furose": "Furosemide",
+    "cetiri": "Cetirizine",
+    "fexofen":"Fexofenadine",
+    "diltia": "Diltiazem",
+    "verap":  "Verapamil",
+    "ranit":  "Ranitidine",
+    "famot":  "Famotidine",
+    "pravas": "Pravastatin",
+    "fluticas":"Fluticasone",
+    "valsar": "Valsartan",
+    "montelu":"Montelukast",
+    "avanaf": "Avanafil",
+    "alfuzo": "Alfuzosin",
+    "norep":  "Norepinephrine",
+    "acarbose":"Acarbose",
+    "dulagl": "Dulaglutide",
+    "liothyr":"Liothyronine",
+    "methylpr":"Methylprednisolone",
 }
 
 
@@ -1414,6 +1586,208 @@ if st.session_state.authenticated or st.session_state.page == "app":
 
             st.markdown("##### Audit Results")
             st.dataframe(display_df.style.apply(style_rows, axis=1), use_container_width=True)
+
+            # ── PHARMACIST OVERRIDE PANEL ─────────────────────────────────────
+            # Build a lookup: abbreviation token → list of candidate drug names
+            # from the full registry, so pharmacists can pick the intended drug.
+            AMBIGUOUS_ABBREVS = {
+                "methyl":  ["Methylprednisolone", "Methylphenidate", "Methyl alpha-D-mannoside"],
+                "hydro":   ["Hydrocortisone", "Hydrochlorothiazide", "Hydrocodone", "Hydroxyzine"],
+                "dex":     ["Dexamethasone", "Dextromethorphan", "Dexlansoprazole", "Dextroamphetamine"],
+                "meth":    ["Metformin", "Methadone", "Methamphetamine", "Methocarbamol"],
+                "lis":     ["Lisinopril", "Lisdexamfetamine"],
+                "praz":    ["Prazosin", "Pravastatin", "Prazepam"],
+                "flud":    ["Fluticasone", "Fludarabine", "Fludrocortisone"],
+                "pred":    ["Prednisone", "Prednisolone", "Methylprednisolone"],
+                "estra":   ["Estradiol", "Estramustine", "Estriol"],
+                "test":    ["Testosterone", "Testerone Micronized"],
+                "alo":     ["Alogliptin", "Aloe 1x", "Allopurinol"],
+                "lina":    ["Linagliptin", "Linaclotide"],
+                "nore":    ["Norepinephrine", "Norelgestromin"],
+                "cipro":   ["Ciprofloxacin", "Ciprofibrate"],
+                "clop":    ["Clopidogrel", "Clonazepam"],
+                "parox":   ["Paroxetine", "Paracetamol Orodispersible"],
+                "rosi":    ["Rosiglitazone", "Pioglitazone"],
+                "digox":   ["Digoxin", "Digitoxin"],
+                "azith":   ["Azithromycin", "Clarithromycin"],
+                "spiro":   ["Spironolactone", "Spirapril"],
+                "lira":    ["Liraglutide", "Liragutide"],
+                "sild":    ["Sildenafil", "Tadalafil"],
+                "vard":    ["Vardenafil", "Sildenafil"],
+                "avan":    ["Avanafil", "Sildenafil"],
+                "furo":    ["Furosemide", "Furosemide Injection"],
+                "lasix":   ["Furosemide", "Torsemide"],
+                "ceti":    ["Cetirizine", "Cetiirizine"],
+                "fexo":    ["Fexofenadine", "Loratadine"],
+                "aten":    ["Atenolol", "Amlodipine"],
+                "prav":    ["Pravastatin", "Prazosin"],
+                "flut":    ["Fluticasone", "Flutamide"],
+                "testo":   ["Testosterone", "Testolactone"],
+                "propyl":  ["Propylthiouracil", "Propylhexedrine"],
+                "norep":   ["Norepinephrine", "Norepinephrine Bitartrate"],
+            }
+
+            # Find rows where the original token is an ambiguous abbreviation
+            all_registry_names = sorted(master_registry["generic_name"].dropna().unique().tolist())
+            ambiguous_rows = results_df[
+                results_df["Cleaned Token"].str.lower().isin(AMBIGUOUS_ABBREVS.keys())
+            ].copy()
+
+            # Also include UNRESOLVED rows for manual override
+            unresolved_rows = results_df[results_df["Generic Name"].str.contains("UNRESOLVED", na=False)].copy()
+
+            if not ambiguous_rows.empty or not unresolved_rows.empty:
+                st.markdown("---")
+                with st.expander("🔬 **Pharmacist Override Panel** — Review & Correct Ambiguous Drug Mappings", expanded=False):
+                    st.info(
+                        "Some abbreviations may map to multiple drugs. Review the auto-resolved mappings below "
+                        "and select the correct drug if the system chose the wrong one. "
+                        "Your corrections will be applied to the final export."
+                    )
+
+                    if "pharmacist_overrides" not in st.session_state:
+                        st.session_state["pharmacist_overrides"] = {}
+
+                    override_applied = False
+
+                    # ── Ambiguous abbreviation overrides ──────────────────────
+                    if not ambiguous_rows.empty:
+                        st.markdown("##### 🔄 Ambiguous Abbreviations")
+                        st.caption("These tokens resolved automatically but may have multiple valid interpretations.")
+
+                        # Group by token to avoid showing same abbreviation multiple times
+                        seen_tokens = set()
+                        for _, row in ambiguous_rows.iterrows():
+                            token = str(row["Cleaned Token"]).lower()
+                            if token in seen_tokens:
+                                continue
+                            seen_tokens.add(token)
+
+                            candidates = AMBIGUOUS_ABBREVS.get(token, [])
+                            current_mapping = str(row["Generic Name"])
+
+                            # Add current mapping to candidates if not already there
+                            if current_mapping not in candidates and current_mapping != "UNRESOLVED — HUMAN OVERRIDE REQUIRED":
+                                candidates = [current_mapping] + candidates
+
+                            # Add full registry search option
+                            candidates_with_search = candidates + ["🔍 Search full registry..."]
+
+                            col_a, col_b = st.columns([2, 3])
+                            with col_a:
+                                st.markdown(f"**`{token}`** → currently: `{current_mapping}`")
+                                st.caption(f"Affects {len(ambiguous_rows[ambiguous_rows['Cleaned Token'].str.lower() == token])} row(s)")
+                            with col_b:
+                                override_key = f"override_{token}"
+                                selected = st.selectbox(
+                                    f"Correct mapping for '{token}':",
+                                    options=candidates_with_search,
+                                    index=0,
+                                    key=override_key,
+                                    label_visibility="collapsed"
+                                )
+                                if selected == "🔍 Search full registry...":
+                                    search_key = f"search_{token}"
+                                    custom = st.selectbox(
+                                        "Search registry:",
+                                        options=[""] + all_registry_names,
+                                        key=search_key
+                                    )
+                                    if custom:
+                                        st.session_state["pharmacist_overrides"][token] = custom
+                                        override_applied = True
+                                elif selected != current_mapping:
+                                    st.session_state["pharmacist_overrides"][token] = selected
+                                    override_applied = True
+                                elif token in st.session_state["pharmacist_overrides"]:
+                                    # User reverted to original
+                                    del st.session_state["pharmacist_overrides"][token]
+
+                    # ── Unresolved row overrides ──────────────────────────────
+                    if not unresolved_rows.empty:
+                        st.markdown("##### ❓ Unresolved Entries — Manual Assignment Required")
+                        st.caption("These entries could not be automatically resolved. Please assign the correct drug.")
+
+                        seen_unresolved = set()
+                        for _, row in unresolved_rows.iterrows():
+                            token = str(row["Cleaned Token"]).lower()
+                            if token in seen_unresolved:
+                                continue
+                            seen_unresolved.add(token)
+
+                            col_a, col_b = st.columns([2, 3])
+                            with col_a:
+                                st.markdown(f"**`{token}`** — ❌ Unresolved")
+                                st.caption(f"Affects {len(unresolved_rows[unresolved_rows['Cleaned Token'].str.lower() == token])} row(s)")
+                            with col_b:
+                                override_key = f"unresolved_{token}"
+                                custom = st.selectbox(
+                                    f"Assign drug for '{token}':",
+                                    options=["— Leave unresolved —"] + all_registry_names,
+                                    key=override_key,
+                                    label_visibility="collapsed"
+                                )
+                                if custom and custom != "— Leave unresolved —":
+                                    st.session_state["pharmacist_overrides"][token] = custom
+                                    override_applied = True
+
+                    # ── Apply overrides to results ────────────────────────────
+                    if st.session_state["pharmacist_overrides"]:
+                        st.markdown("---")
+                        st.markdown("**Active Overrides:**")
+                        for tok, drug in st.session_state["pharmacist_overrides"].items():
+                            st.markdown(f"- `{tok}` → **{drug}**")
+
+                        col_apply, col_clear = st.columns([3, 1])
+                        with col_apply:
+                            if st.button("✅ Apply Overrides & Regenerate Results", type="primary", use_container_width=True):
+                                # Apply overrides to results_df in-memory
+                                corrected_df = results_df.copy()
+                                saved_count = 0
+                                failed_saves = []
+                                for tok, drug in st.session_state["pharmacist_overrides"].items():
+                                    mask = corrected_df["Cleaned Token"].str.lower() == tok
+                                    corrected_df.loc[mask, "Generic Name"] = drug
+                                    corrected_df.loc[mask, "Match Layer"] = "Layer 0: Pharmacist Override"
+                                    corrected_df.loc[mask, "Confidence"] = "100.0%"
+                                    # Persist to abbreviations.json so future invoices resolve correctly
+                                    if persist_pharmacist_override(tok, drug):
+                                        saved_count += 1
+                                    else:
+                                        failed_saves.append(tok)
+                                st.session_state["audit_data"] = corrected_df
+                                # Also purge the stale cache entries for overridden tokens
+                                cache_db = load_cache_db()
+                                cache_dirty = False
+                                for tok in st.session_state["pharmacist_overrides"]:
+                                    keys_to_remove = [k for k in cache_db if k.split("||")[-1].lower() == tok]
+                                    for k in keys_to_remove:
+                                        del cache_db[k]
+                                        cache_dirty = True
+                                if cache_dirty:
+                                    save_cache_db(cache_db)
+                                # Show result
+                                n = len(st.session_state["pharmacist_overrides"])
+                                if saved_count == n:
+                                    st.success(
+                                        f"✅ Applied {n} override(s). "
+                                        f"All {saved_count} mapping(s) permanently saved to abbreviations.json — "
+                                        f"future invoices will resolve these automatically."
+                                    )
+                                elif saved_count > 0:
+                                    st.warning(
+                                        f"Applied {n} override(s). {saved_count} saved permanently. "
+                                        f"Could not persist: {', '.join(failed_saves)} (read-only filesystem)."
+                                    )
+                                else:
+                                    st.info(f"Applied {n} override(s) to this session. "
+                                            f"Could not save permanently (read-only filesystem).")
+                                st.rerun()
+
+                        with col_clear:
+                            if st.button("🗑️ Clear All", use_container_width=True):
+                                st.session_state["pharmacist_overrides"] = {}
+                                st.rerun()
 
             st.markdown("---")
             st.markdown("#### 📤 Export")
