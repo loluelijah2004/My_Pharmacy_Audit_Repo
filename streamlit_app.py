@@ -44,8 +44,14 @@ WHOP_API_KEY = st.secrets.get("WHOP_API_KEY", "")
 # =====================================================================
 def check_whop_authorization(membership_id: str) -> bool:
     """Verifies membership directly with Whop's ledger. Locks out unauthorized shares."""
+    
+    # 🛠️ THE DEVELOPER BACKDOOR (Remove or change before public launch!)
+    if membership_id == "apex_admin_2026":
+        return True
+        
     if not membership_id or not WHOP_API_KEY:
         return False
+        
     url = f"https://api.whop.com/v5/memberships/{membership_id}"
     headers = {
         "Authorization": f"Bearer {WHOP_API_KEY}", 
