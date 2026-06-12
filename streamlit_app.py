@@ -994,7 +994,7 @@ def run_reconciliation(client_df: pd.DataFrame, master_df: pd.DataFrame,
     l2_pending = [i for i in range(n_rows) if not resolved[i]]
     if l2_pending:
         batch_tokens = [clean_tokens[i] for i in l2_pending]
-        l2_threshold_actual = max(0.30, l2_threshold * 0.8)
+        l2_threshold_actual = max(0.65, l2_threshold * 0.8)
         batch_hits   = tfidf_match_batch(batch_tokens, master_df, region_key, l2_threshold_actual)
         for i, (tfidf_name, tfidf_score) in zip(l2_pending, batch_hits):
             l2_tried[i]      = True
@@ -1038,6 +1038,10 @@ def run_reconciliation(client_df: pd.DataFrame, master_df: pd.DataFrame,
     if cache_dirty:
         save_cache_db(cache_db)
 
+    # Build user-controlled baseline from first invoice per drug
+    # Maps resolved_name -> first_invoice_price for that drug
+    user_baseline_cache = {}
+    
     rows = []
     for i in range(n_rows):
         resolved_name = resolved[i]
@@ -1051,13 +1055,17 @@ def run_reconciliation(client_df: pd.DataFrame, master_df: pd.DataFrame,
                 confidences[i] = 0.0
             baseline_price = 0.0
         else:
+            # Use first invoice price for this drug as user-controlled baseline
+            if resolved_name not in user_baseline_cache:
+                user_baseline_cache[resolved_name] = invoice_prices[i]
+            baseline_price = user_baseline_cache[resolved_name]
+            
             reg_row = master_df[master_df["generic_name"] == resolved_name]
             if not reg_row.empty:
                 brand_names[i]  = str(reg_row.iloc[0]["brand_name"])
                 system_ids[i]   = str(reg_row.iloc[0]["system_id"])
-                baseline_price  = float(reg_row.iloc[0]["baseline_price"])
             else:
-                baseline_price = 0.0
+                system_ids[i]   = "N/A"
 
         variance     = (invoice_prices[i] - baseline_price) if baseline_price > 0 else 0.0
         variance_pct = (variance / baseline_price * 100) if baseline_price > 0 else 0.0
