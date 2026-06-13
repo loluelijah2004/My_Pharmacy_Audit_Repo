@@ -1356,23 +1356,21 @@ if st.session_state.page == "landing":
             }
         </style>
     """, unsafe_allow_html=True)
-    
-   nav_col1, nav_col2 = st.columns([8, 2])
-with nav_col1:
-    # Added inline font-size and weight to bump up the logo presence
-    st.markdown('<div class="apex-logo" style="font-size: 2.2rem; font-weight: bold;">🧬 APEX LOGIC</div>', unsafe_allow_html=True)
-with nav_col2:
-    if st.button("🔒 Client Login Portal", use_container_width=True, type="secondary"):
-        st.session_state.page = "login"
-        st.rerun()
 
-st.markdown("---")
-hero_col1, hero_col2 = st.columns([6, 4])
-with hero_col1:
-    # Added substantial font-size and a tight line-height to keep the big hero text looking clean
-    st.markdown('<p class="hero-title" style="font-size: 3.5rem; line-height: 1.15; font-weight: 700;">Stop Manually Wrestling with <span class="accent-text">Pharmacy Vendor Invoices</span>.</p>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-hero">The automated data harmonization engine built for modern pharmacies. Instantly scrub, standardize, and format messy supplier spreadsheets across the UK, Canada, and the US.</p>', unsafe_allow_html=True)
-with hero_col2:
+    nav_col1, nav_col2 = st.columns([8, 2])
+    with nav_col1:
+        st.markdown('<div class="apex-logo">🧬 APEX LOGIC</div>', unsafe_allow_html=True)
+    with nav_col2:
+        if st.button("🔒 Client Login Portal", use_container_width=True, type="secondary"):
+            st.session_state.page = "login"
+            st.rerun()
+
+    st.markdown("---")
+    hero_col1, hero_col2 = st.columns([6, 4])
+    with hero_col1:
+        st.markdown('<p class="hero-title">Stop Manually Wrestling with <span class="accent-text">Pharmacy Vendor Invoices</span>.</p>', unsafe_allow_html=True)
+        st.markdown('<p class="sub-hero">The automated data harmonization engine built for modern pharmacies. Instantly scrub, standardize, and format messy supplier spreadsheets across the UK, Canada, and the US.</p>', unsafe_allow_html=True)
+    with hero_col2:
         st.markdown("""
             <div class="pipeline-box">
                 <div class="pipeline-title">📦 Data Pipeline Ingestion Stream</div>
@@ -1405,13 +1403,13 @@ with hero_col2:
     st.markdown("### 💳 Corporate Deployment Packages")
     tier1_col, tier2_col, tier3_col = st.columns(3)
     with tier1_col:
-        st.markdown('<div class="price-card"><h4>Tier 1: Standalone Toolkit</h4><h2>$149 <span style="font-size:1rem;color:#A0AEC0">One-Time Payment</span></h2><hr style="border-color:#2D3748"><p style="margin-bottom:0.5rem;">• Full master abbreviation mapping package (abbreviations.json)</p><p style="margin-bottom:0.5rem;">• Local pipeline implementation and audit templates</p><p style="margin-bottom:0.5rem;">• Optimized for internal development and localized audit setups</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="price-card"><h4><span class="flag-badge">🇺🇸 🇨🇦 🇬🇧</span> Tier 1: Standalone Toolkit</h4><h2>$149 <span style="font-size:1rem;color:#A0AEC0">One-Time Payment</span></h2><hr style="border-color:#2D3748"><p style="margin-bottom:0.5rem;">• Full master abbreviation mapping package (abbreviations.json)</p><p style="margin-bottom:0.5rem;">• Local pipeline implementation and audit templates</p><p style="margin-bottom:0.5rem;">• Optimized for internal development and localized audit setups</p></div>', unsafe_allow_html=True)
         st.link_button("Get Standalone Kit", "https://whop.com/your-tier-1-checkout-link", use_container_width=True)
     with tier2_col:
-        st.markdown('<div class="price-card-premium"><h4>Tier 2: Cloud Instance Software Access</h4><h2>$699 <span style="font-size:1rem;color:#A0AEC0">/ Month</span></h2><hr style="border-color:#00FFBB"><p style="margin-bottom:0.5rem;">• Infinite, automated 24/7 web application invoice uploads</p><p style="margin-bottom:0.5rem;">• Multi-regional database compliance (UK, Canada, US formats)</p><p style="margin-bottom:0.5rem;">• Absolute cross-border matrix validation engine</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="price-card-premium"><h4><span class="flag-badge">🇺🇸 🇨🇦 🇬🇧</span> Tier 2: Cloud Instance Software Access</h4><h2>$699 <span style="font-size:1rem;color:#A0AEC0">/ Month</span></h2><hr style="border-color:#00FFBB"><p style="margin-bottom:0.5rem;">• Infinite, automated 24/7 web application invoice uploads</p><p style="margin-bottom:0.5rem;">• Multi-regional database compliance (UK, Canada, US formats)</p><p style="margin-bottom:0.5rem;">• Absolute cross-border matrix validation engine</p></div>', unsafe_allow_html=True)
         st.link_button("Launch Cloud Engine", "https://whop.com/your-tier-2-checkout-link", type="primary", use_container_width=True)
     with tier3_col:
-        st.markdown('<div class="price-card"><h4>Tier 3: Bespoke Enterprise Integration</h4><h2>$3,500 <span style="font-size:1rem;color:#A0AEC0">Setup</span> + $299<span style="font-size:1rem;color:#A0AEC0">/Mo</span></h2><hr style="border-color:#2D3748"><p style="margin-bottom:0.5rem;">• Custom logic mapped directly to your specific PMS layouts</p><p style="margin-bottom:0.5rem;">• Secure automated webhooks and pipeline scripts</p><p style="margin-bottom:0.5rem;">• Priority server allocation & dedicated architecture kickoff strategy call</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="price-card"><h4><span class="flag-badge">🇺🇸 🇨🇦 🇬🇧</span> Tier 3: Bespoke Enterprise Integration</h4><h2>$3,500 <span style="font-size:1rem;color:#A0AEC0">Setup</span> + $299<span style="font-size:1rem;color:#A0AEC0">/Mo</span></h2><hr style="border-color:#2D3748"><p style="margin-bottom:0.5rem;">• Custom logic mapped directly to your specific PMS layouts</p><p style="margin-bottom:0.5rem;">• Secure automated webhooks and pipeline scripts</p><p style="margin-bottom:0.5rem;">• Priority server allocation & dedicated architecture kickoff strategy call</p></div>', unsafe_allow_html=True)
         st.link_button("Book Integration Call", "https://calendly.com/your-link", use_container_width=True)
 
 # STATE 2: LOGIN PAGE
